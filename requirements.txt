@@ -1,0 +1,9 @@
+
+# Install with:  pip install -r requirements.txt
+cryptography
+typer
+fastapi
+uvicorn
+python-multipart
+pytest
+ 

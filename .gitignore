@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Vault data: never commit keys, encrypted files, or databases
+vault_data/
+*.vault
+*.db
+*.sqlite
+*.sqlite3
+*.key
+*.pem
+*.enc
+
+# Synthetic test data (regenerate with scripts/make_test_data.py)
+test_data/
+*.mp4
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
