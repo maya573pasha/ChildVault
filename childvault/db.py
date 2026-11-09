@@ -203,6 +203,21 @@ def get_file(conn: sqlite3.Connection, file_id: str) -> sqlite3.Row:
     return row
 
 
+def rotate_file_key(conn: sqlite3.Connection, file_id: str, wrapped_key: bytes) -> int:
+    """
+    Replace a file's wrapped key and bump key_version; returns the new version.
+    Does NOT commit: the caller wraps it in `with conn:` together with the
+    file swap, so the database and the .enc file change together or not at all.
+    """
+    cur = conn.execute(
+        "UPDATE files SET wrapped_key = ?, key_version = key_version + 1 WHERE file_id = ?",
+        (wrapped_key, file_id),
+    )
+    if cur.rowcount != 1:
+        raise FileNotInVaultError(f"no file with id {file_id}")
+    return conn.execute("SELECT key_version FROM files WHERE file_id = ?", (file_id,)).fetchone()[0]
+
+
 def list_files(conn: sqlite3.Connection, child_id: str | None = None) -> list[sqlite3.Row]:
     """All files, oldest first; optionally only those of one pseudonymous child."""
     if child_id is None:

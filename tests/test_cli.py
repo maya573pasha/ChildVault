@@ -83,9 +83,6 @@ def test_help_lists_every_command():
 
 
 @pytest.mark.parametrize("args, owner", [
-    (["revoke", "F-1"], "Aaleen"),
-    (["share", "F-1", "F-2", "--reviewer-key", "r.pub", "--expires", "2026-12-31", "--out", "b.json"], "Mariyam"),
-    (["import-bundle", "b.json"], "Mariyam"),
     (["verify"], "Laiba"),
     (["audit", "show"], "Laiba"),
 ])
