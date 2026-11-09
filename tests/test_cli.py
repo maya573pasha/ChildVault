@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from typer.testing import CliRunner
 
@@ -81,7 +83,6 @@ def test_help_lists_every_command():
 
 
 @pytest.mark.parametrize("args, owner", [
-    (["open-file", "F-1", "--out", "x.mp4"], "Aaleen"),
     (["revoke", "F-1"], "Aaleen"),
     (["share", "F-1", "F-2", "--reviewer-key", "r.pub", "--expires", "2026-12-31", "--out", "b.json"], "Mariyam"),
     (["import-bundle", "b.json"], "Mariyam"),
@@ -93,13 +94,6 @@ def test_stub_says_not_implemented_with_owner(args, owner):
     assert result.exit_code == 1
     assert "not implemented" in result.output
     assert owner in result.output
-
-
-def test_add_file_stub(tmp_path):
-    f = tmp_path / "clip.mp4"
-    f.write_bytes(b"x")
-    result = runner.invoke(app, ["add-file", str(f), "--type", "video", "--child", "CH-4F7A"])
-    assert result.exit_code == 1 and "Aaleen" in result.output
 
 
 def test_add_file_rejects_missing_file():
@@ -329,3 +323,144 @@ def test_web_refuses_without_vault():
     result = runner.invoke(app, ["web"])
     assert result.exit_code == 1
     assert "no vault found" in result.output
+
+
+# ---------------------------------------------------------------- add-file / open-file
+
+def _add(path, *extra):
+    return runner.invoke(app, ["add-file", str(path), *extra, "--passphrase", PW])
+
+
+def _open(file_id, out, passphrase=PW):
+    return runner.invoke(app, ["open-file", file_id, "--out", str(out), "--passphrase", passphrase])
+
+
+def _added_id(result):
+    assert result.exit_code == 0, result.output
+    return result.output.split("Added ")[1].split()[0]
+
+
+def test_add_and_open_roundtrip(tmp_path, temp_vault):
+    _make_vault()
+    src = tmp_path / "secret.csv"
+    data = os.urandom(3 * vc.CHUNK_SIZE // 2)
+    src.write_bytes(data)
+    file_id = _added_id(_add(src, "--type", "csv"))
+    assert db.FILE_TYPES and file_id.startswith("F-") and len(file_id) == 18
+    assert not any("secret" in p.name for p in temp_vault.rglob("*"))
+
+    conn = db.connect()
+    try:
+        row = db.get_file(conn, file_id)
+    finally:
+        conn.close()
+    assert row["file_type"] == "csv" and row["extension"] == "csv"
+    assert row["plaintext_size"] == len(data) and row["child_id"] is None
+
+    out = tmp_path / "restored.csv"
+    result = _open(file_id, out)
+    assert result.exit_code == 0, result.output
+    assert out.read_bytes() == data
+
+
+def test_add_file_with_child(tmp_path):
+    _make_vault()
+    cid = _pseudonymize("Test Child")
+    src = tmp_path / "a.mp4"
+    src.write_bytes(b"video")
+    _added_id(_add(src, "--type", "video", "--child", cid.lower()))
+    result = runner.invoke(app, ["lookup", cid, "--passphrase", PW])
+    assert "Files in vault for this child: 1" in result.output
+
+
+def test_add_file_unknown_or_invalid_child(tmp_path, temp_vault):
+    _make_vault()
+    src = tmp_path / "a.bin"
+    src.write_bytes(b"x")
+    assert _add(src, "--child", "CH-0000").exit_code == 1
+    assert _add(src, "--child", "Ali Khan").exit_code == 1
+    assert list((temp_vault / "files").glob("*.enc")) == []
+
+
+def test_add_file_wrong_passphrase_stores_nothing(tmp_path, temp_vault):
+    _make_vault()
+    src = tmp_path / "a.bin"
+    src.write_bytes(b"x")
+    result = runner.invoke(app, ["add-file", str(src), "--passphrase", "wrong passphrase"])
+    assert result.exit_code == 1
+    assert list((temp_vault / "files").glob("*.enc")) == []
+
+
+def test_add_file_without_vault_fails_cleanly(tmp_path):
+    src = tmp_path / "a.bin"
+    src.write_bytes(b"x")
+    result = _add(src)
+    assert result.exit_code == 1 and "no vault found" in result.output
+
+
+def test_open_wrong_passphrase(tmp_path):
+    _make_vault()
+    src = tmp_path / "a.bin"
+    src.write_bytes(b"hello")
+    file_id = _added_id(_add(src))
+    out = tmp_path / "o.bin"
+    assert _open(file_id, out, passphrase="wrong passphrase").exit_code == 1
+    assert not out.exists()
+
+
+def test_open_detects_tampered_file(tmp_path, temp_vault):
+    _make_vault()
+    src = tmp_path / "a.bin"
+    src.write_bytes(os.urandom(5000))
+    file_id = _added_id(_add(src))
+    enc = temp_vault / "files" / f"{file_id}.enc"
+    blob = bytearray(enc.read_bytes())
+    blob[100] ^= 0x01
+    enc.write_bytes(bytes(blob))
+    out = tmp_path / "o.bin"
+    assert _open(file_id, out).exit_code == 1
+    assert not out.exists()
+
+
+def test_open_detects_swapped_wrapped_key(tmp_path):
+    _make_vault()
+    a, b = tmp_path / "a.bin", tmp_path / "b.bin"
+    a.write_bytes(b"first")
+    b.write_bytes(b"second")
+    id1, id2 = _added_id(_add(a)), _added_id(_add(b))
+    conn = db.connect()
+    try:
+        k1 = db.get_file(conn, id1)["wrapped_key"]
+        k2 = db.get_file(conn, id2)["wrapped_key"]
+        with conn:
+            conn.execute("UPDATE files SET wrapped_key = ? WHERE file_id = ?", (k2, id1))
+            conn.execute("UPDATE files SET wrapped_key = ? WHERE file_id = ?", (k1, id2))
+    finally:
+        conn.close()
+    out = tmp_path / "o.bin"
+    assert _open(id1, out).exit_code == 1
+    assert not out.exists()
+
+
+def test_open_rejects_bad_ids_and_existing_output(tmp_path):
+    _make_vault()
+    out = tmp_path / "o.bin"
+    assert _open("../vault", out).exit_code == 1
+    assert _open("F-../../x", out).exit_code == 1
+    assert _open("F-ffffffffffffffff", out).exit_code == 1      # well-formed but unknown
+    src = tmp_path / "a.bin"
+    src.write_bytes(b"hello")
+    file_id = _added_id(_add(src))
+    out.write_bytes(b"existing")
+    assert _open(file_id, out).exit_code == 1
+    assert out.read_bytes() == b"existing"
+
+
+def test_open_reports_missing_blob(tmp_path, temp_vault):
+    _make_vault()
+    src = tmp_path / "a.bin"
+    src.write_bytes(b"hello")
+    file_id = _added_id(_add(src))
+    (temp_vault / "files" / f"{file_id}.enc").unlink()
+    result = _open(file_id, tmp_path / "o.bin")
+    assert result.exit_code == 1 and "missing" in result.output

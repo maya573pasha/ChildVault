@@ -7,6 +7,7 @@ Each command is a small function. Teammates add their commands here
 (add-file, open-file, verify, share, ...) following the same pattern.
 """
 
+import re
 import sqlite3
 from enum import Enum
 from pathlib import Path
@@ -19,6 +20,7 @@ from . import keyshare as ks
 from . import vault_crypto as vc
 
 MIN_PASSPHRASE_LEN = 8
+FILE_ID_RE = re.compile(r"^F-[0-9a-f]{16}$")      # matches db.new_file_id()
 
 app = typer.Typer(
     help="ChildVault: encrypted, tamper-evident storage for child-behaviour data.",
@@ -170,18 +172,79 @@ def add_file(
     path: Path = typer.Argument(..., exists=True, dir_okay=False, help="File to encrypt into the vault."),
     file_type: FileType = typer.Option(FileType.other, "--type", help="Kind of file."),
     child_id: str = typer.Option(None, "--child", help="Pseudonym the file belongs to, e.g. CH-4F7A."),
+    passphrase: str = passphrase_option(),
 ) -> None:
     """Encrypt a file into the vault (AES-256-GCM, own random key)."""
-    not_implemented("Aaleen", 2)
+    cid = None
+    if child_id is not None:
+        try:
+            cid = idm.normalize_child_id(child_id)    # reject bad input before unlocking
+        except idm.InvalidChildIDError as exc:
+            fail(str(exc))
+
+    conn, kek = unlock_vault(passphrase)
+    try:
+        if cid is not None:
+            imap = load_identity_map(kek)
+            if cid not in imap.ids():
+                fail(f"no child with id {cid} - run `childvault pseudonymize` first")
+
+        files_dir = config.get_files_dir()
+        files_dir.mkdir(parents=True, exist_ok=True)
+        file_id = db.new_file_id()
+        while (files_dir / f"{file_id}.enc").exists():
+            file_id = db.new_file_id()
+        enc_path = files_dir / f"{file_id}.enc"
+
+        data_key = vc.generate_data_key()
+        try:
+            vc.encrypt_file(path, enc_path, data_key, file_id)
+            db.add_file_record(
+                conn, file_id, vc.wrap_key(kek, data_key, file_id), file_type.value,
+                path.suffix, "owner", child_id=cid, plaintext_size=path.stat().st_size,
+            )
+        except (vc.VaultCryptoError, db.VaultDBError, OSError) as exc:
+            enc_path.unlink(missing_ok=True)          # no orphan blob without a record
+            fail(str(exc))
+    finally:
+        conn.close()
+
+    typer.secho(f"Added {file_id}", fg=typer.colors.GREEN)
 
 
 @app.command("open-file")
 def open_file(
     file_id: str = typer.Argument(..., help="Vault file ID, e.g. F-3f9a1c0b7e2d4a65."),
     out: Path = typer.Option(..., "--out", help="Where to write the decrypted file."),
+    passphrase: str = passphrase_option(),
 ) -> None:
     """Decrypt a file from the vault (fails if it was tampered with)."""
-    not_implemented("Aaleen", 2)
+    # Strict format check first: the ID becomes part of a path, so no "../".
+    if not FILE_ID_RE.match(file_id):
+        fail("invalid file ID")
+    if out.exists():
+        fail(f"'{out}' already exists; choose a new output path")
+
+    conn, kek = unlock_vault(passphrase)
+    try:
+        try:
+            row = db.get_file(conn, file_id)
+        except db.FileNotInVaultError:
+            fail(f"file '{file_id}' not found in the vault")
+        enc_path = config.get_files_dir() / f"{file_id}.enc"
+        if not enc_path.is_file():
+            fail(f"encrypted data for '{file_id}' is missing from the vault folder")
+        try:
+            data_key = vc.unwrap_key(kek, bytes(row["wrapped_key"]), file_id)
+            vc.decrypt_file(enc_path, out, data_key, file_id)
+        except vc.VaultCryptoError as exc:
+            fail(str(exc))
+        except OSError as exc:
+            fail(str(exc))
+    finally:
+        conn.close()
+
+    typer.secho(f"Decrypted {file_id} to '{out}'", fg=typer.colors.GREEN)
 
 
 @app.command()
