@@ -14,6 +14,7 @@ from pathlib import Path
 import typer
 
 from . import __version__, config, db
+from . import identity as idm
 from . import vault_crypto as vc
 
 MIN_PASSPHRASE_LEN = 8
@@ -75,6 +76,16 @@ def unlock_vault(passphrase: str) -> tuple[sqlite3.Connection, bytes]:
     return conn, kek
 
 
+def load_identity_map(kek: bytes) -> idm.IdentityMap:
+    """Load and decrypt identity_map.enc, turning its errors into clear CLI messages."""
+    try:
+        return idm.load_map(kek, config.get_identity_map_path())
+    except idm.MapMissingError:
+        fail("identity map is missing - it may have been deleted (restore it from a backup)")
+    except idm.MapIntegrityError:
+        fail("identity map failed its integrity check - it was modified or damaged")
+
+
 def _version_callback(value: bool) -> None:
     if value:
         typer.echo(f"childvault {__version__}")
@@ -109,6 +120,11 @@ def init(
         if db.is_initialized(conn):
             fail(f"a vault already exists in {vault_dir}")
         header = vc.new_vault_header(passphrase)
+        # Create the (empty) encrypted ID-name map BEFORE saving the header:
+        # a vault never exists without its map, so a missing map later
+        # always means deletion or damage.
+        kek = vc.unlock(passphrase, header)
+        idm.save_map(kek, idm.IdentityMap(), config.get_identity_map_path())
         db.save_header(conn, header)
     finally:
         conn.close()
@@ -179,18 +195,52 @@ def revoke(
 
 @app.command()
 def pseudonymize(
-    name: str = typer.Argument(..., help="Real name of the child."),
+    name: str = typer.Option(
+        ..., "--name", prompt="Child's real name",
+        help="Real name (asked interactively if omitted, so it stays out of shell history).",
+    ),
+    passphrase: str = passphrase_option(),
 ) -> None:
     """Give a child a random pseudonym (e.g. CH-4F7A)."""
-    not_implemented("Mariyam", 2)
+    conn, kek = unlock_vault(passphrase)
+    conn.close()                                  # the map lives outside the DB
+
+    imap = load_identity_map(kek)
+    try:
+        child_id = imap.add(name)
+    except idm.IdentityError as exc:
+        fail(str(exc))
+    idm.save_map(kek, imap, config.get_identity_map_path())
+
+    typer.secho(f"Pseudonym: {child_id}", fg=typer.colors.GREEN)
+    typer.echo("Use this ID everywhere instead of the child's name.")
 
 
 @app.command()
 def lookup(
     child_id: str = typer.Argument(..., help="Pseudonym to resolve, e.g. CH-4F7A."),
+    passphrase: str = passphrase_option(),
 ) -> None:
     """Show the real name behind a pseudonym (owner only)."""
-    not_implemented("Mariyam", 2)
+    try:
+        cid = idm.normalize_child_id(child_id)    # reject bad input before unlocking
+    except idm.InvalidChildIDError as exc:
+        fail(str(exc))
+
+    conn, kek = unlock_vault(passphrase)
+    try:
+        n_files = len(db.list_files(conn, cid))
+    finally:
+        conn.close()
+
+    imap = load_identity_map(kek)
+    try:
+        name = imap.lookup(cid)
+    except idm.UnknownChildIDError as exc:
+        fail(str(exc))
+
+    typer.echo(f"{cid}  ->  {name}")
+    typer.echo(f"Files in vault for this child: {n_files}")
 
 
 @app.command()

@@ -2,6 +2,7 @@ import pytest
 from typer.testing import CliRunner
 
 from childvault import __version__, config, db
+from childvault import identity as idm
 from childvault import vault_crypto as vc
 from childvault.cli import app
 
@@ -81,8 +82,6 @@ def test_help_lists_every_command():
 @pytest.mark.parametrize("args, owner", [
     (["open-file", "F-1", "--out", "x.mp4"], "Aaleen"),
     (["revoke", "F-1"], "Aaleen"),
-    (["pseudonymize", "Test Child"], "Mariyam"),
-    (["lookup", "CH-4F7A"], "Mariyam"),
     (["share", "F-1", "F-2", "--reviewer-key", "r.pub", "--expires", "2026-12-31", "--out", "b.json"], "Mariyam"),
     (["import-bundle", "b.json"], "Mariyam"),
     (["verify"], "Laiba"),
@@ -158,3 +157,113 @@ def test_unlock_vault_returns_working_kek():
         assert len(wrapped) == vc.WRAPPED_LEN
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------- pseudonymize / lookup
+
+def _pseudonymize(name):
+    result = runner.invoke(app, ["pseudonymize", "--name", name, "--passphrase", PW])
+    assert result.exit_code == 0, result.output
+    return result.output.split("Pseudonym: ")[1].split()[0]
+
+
+def test_init_creates_empty_encrypted_map():
+    _make_vault()
+    path = config.get_identity_map_path()
+    assert path.is_file()
+    conn = db.connect()
+    try:
+        kek = vc.unlock(PW, db.load_header(conn))
+    finally:
+        conn.close()
+    assert len(idm.load_map(kek, path)) == 0
+
+
+def test_pseudonymize_then_lookup():
+    _make_vault()
+    cid = _pseudonymize("Test Child One")
+    assert idm.is_valid_child_id(cid)
+    result = runner.invoke(app, ["lookup", cid.lower(), "--passphrase", PW])
+    assert result.exit_code == 0, result.output
+    assert f"{cid}  ->  Test Child One" in result.output
+    assert "Files in vault for this child: 0" in result.output
+
+
+def test_pseudonymize_prompts_for_name():
+    _make_vault()
+    result = runner.invoke(app, ["pseudonymize", "--passphrase", PW], input="Test Child Two\n")
+    assert result.exit_code == 0, result.output
+    assert "Pseudonym: CH-" in result.output
+
+
+def test_two_children_get_different_ids():
+    _make_vault()
+    assert _pseudonymize("Sam") != _pseudonymize("Sam")
+
+
+def test_name_never_written_in_plaintext(temp_vault):
+    _make_vault()
+    _pseudonymize("Unmistakable Name")
+    for f in temp_vault.rglob("*"):
+        if f.is_file():
+            assert b"Unmistakable" not in f.read_bytes(), f
+
+
+def test_pseudonymize_wrong_passphrase_changes_nothing():
+    _make_vault()
+    before = config.get_identity_map_path().read_bytes()
+    result = runner.invoke(app, ["pseudonymize", "--name", "X", "--passphrase", "wrong passphrase"])
+    assert result.exit_code == 1
+    assert config.get_identity_map_path().read_bytes() == before
+
+
+def test_pseudonymize_empty_name_refused():
+    _make_vault()
+    result = runner.invoke(app, ["pseudonymize", "--name", "   ", "--passphrase", PW])
+    assert result.exit_code == 1
+    assert "must not be empty" in result.output
+
+
+def test_lookup_unknown_id():
+    _make_vault()
+    result = runner.invoke(app, ["lookup", "CH-0000", "--passphrase", PW])
+    assert result.exit_code == 1
+    assert "no child with id CH-0000" in result.output
+
+
+def test_lookup_invalid_id_rejected_before_passphrase():
+    _make_vault()
+    result = runner.invoke(app, ["lookup", "Ali Khan"], input=f"{PW}\n")
+    assert result.exit_code == 1
+    assert "not a valid child ID" in result.output
+
+
+def test_lookup_counts_child_files():
+    _make_vault()
+    cid = _pseudonymize("Test Child")
+    conn = db.connect()
+    kek = vc.unlock(PW, db.load_header(conn))
+    db.add_file_record(conn, "F-1", vc.wrap_key(kek, vc.generate_data_key(), "F-1"),
+                       "video", "mp4", "owner", child_id=cid)
+    conn.close()
+    result = runner.invoke(app, ["lookup", cid, "--passphrase", PW])
+    assert "Files in vault for this child: 1" in result.output
+
+
+def test_deleted_map_is_reported():
+    _make_vault()
+    config.get_identity_map_path().unlink()
+    result = runner.invoke(app, ["lookup", "CH-0000", "--passphrase", PW])
+    assert result.exit_code == 1
+    assert "identity map is missing" in result.output
+
+
+def test_tampered_map_is_reported():
+    _make_vault()
+    path = config.get_identity_map_path()
+    blob = bytearray(path.read_bytes())
+    blob[-1] ^= 0x01
+    path.write_bytes(bytes(blob))
+    result = runner.invoke(app, ["pseudonymize", "--name", "X", "--passphrase", PW])
+    assert result.exit_code == 1
+    assert "integrity check" in result.output
