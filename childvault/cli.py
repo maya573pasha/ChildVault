@@ -7,6 +7,7 @@ Each command is a small function. Teammates add their commands here
 (add-file, open-file, verify, share, ...) following the same pattern.
 """
 
+import sqlite3
 from enum import Enum
 from pathlib import Path
 
@@ -33,6 +34,45 @@ def fail(message: str) -> None:
 def not_implemented(owner: str, phase: int) -> None:
     """Placeholder body for a command a teammate will fill in."""
     fail(f"not implemented yet (owner: {owner}, Phase {phase})")
+
+
+def passphrase_option():
+    """
+    The --passphrase option for every command that needs the KEK.
+    Asked interactively (hidden) if not given. A new object is made per
+    command because Typer options should not be shared between commands.
+    """
+    return typer.Option(
+        ..., prompt="Vault passphrase", hide_input=True,
+        help="Vault passphrase (asked interactively if omitted).",
+    )
+
+
+def unlock_vault(passphrase: str) -> tuple[sqlite3.Connection, bytes]:
+    """
+    Open the existing vault and derive the KEK from the passphrase.
+
+    Returns (conn, kek). The caller must close conn. Exits with a clear
+    error if there is no vault or the passphrase is wrong.
+    """
+    # Check first: sqlite3.connect() would silently CREATE an empty database.
+    if not config.get_db_path().is_file():
+        fail(f"no vault found in {config.get_vault_dir()} - run `childvault init` first")
+
+    conn = db.connect()
+    try:
+        header = db.load_header(conn)
+        kek = vc.unlock(passphrase, header)
+    except db.VaultNotInitializedError:
+        conn.close()
+        fail("vault is not initialized - run `childvault init` first")
+    except vc.WrongPassphraseError:
+        conn.close()
+        fail("wrong passphrase")
+    except vc.VaultCryptoError as exc:
+        conn.close()
+        fail(f"vault header is damaged: {exc}")
+    return conn, kek
 
 
 def _version_callback(value: bool) -> None:
@@ -75,6 +115,22 @@ def init(
 
     typer.secho(f"Vault created in {vault_dir.resolve()}", fg=typer.colors.GREEN)
     typer.echo("Keep your passphrase safe: it cannot be recovered.")
+
+
+@app.command()
+def status(passphrase: str = passphrase_option()) -> None:
+    """Check the passphrase and show a summary of the vault."""
+    conn, _kek = unlock_vault(passphrase)
+    try:
+        n_files = len(db.list_files(conn))
+        n_log = len(db.get_audit_rows(conn))
+    finally:
+        conn.close()
+
+    typer.secho("Vault unlocked.", fg=typer.colors.GREEN)
+    typer.echo(f"Location:     {config.get_vault_dir().resolve()}")
+    typer.echo(f"Files:        {n_files}")
+    typer.echo(f"Log entries:  {n_log}")
 
 
 # ==========================================================================

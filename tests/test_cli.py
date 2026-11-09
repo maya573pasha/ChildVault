@@ -68,7 +68,7 @@ def test_mismatched_confirmation_refused():
 
 # ---------------------------------------------------------------- stub commands
 
-ALL_COMMANDS = ["init", "add-file", "open-file", "revoke", "pseudonymize",
+ALL_COMMANDS = ["init", "status", "add-file", "open-file", "revoke", "pseudonymize",
                 "lookup", "share", "import-bundle", "verify", "audit"]
 
 
@@ -117,3 +117,44 @@ def test_add_file_rejects_unknown_type(tmp_path):
 def test_file_type_choices_match_database():
     from childvault.cli import FileType
     assert tuple(t.value for t in FileType) == db.FILE_TYPES
+
+
+# ---------------------------------------------------------------- unlock / status
+
+def _make_vault():
+    result = runner.invoke(app, ["init", "--passphrase", PW])
+    assert result.exit_code == 0, result.output
+
+
+def test_status_with_correct_passphrase():
+    _make_vault()
+    result = runner.invoke(app, ["status"], input=f"{PW}\n")
+    assert result.exit_code == 0, result.output
+    assert "Vault unlocked" in result.output
+    assert "Files:        0" in result.output
+    assert PW not in result.output             # prompt input is hidden
+
+
+def test_status_wrong_passphrase():
+    _make_vault()
+    result = runner.invoke(app, ["status", "--passphrase", "not the passphrase"])
+    assert result.exit_code == 1
+    assert "wrong passphrase" in result.output
+
+
+def test_status_without_vault_does_not_create_one(temp_vault):
+    result = runner.invoke(app, ["status", "--passphrase", PW])
+    assert result.exit_code == 1
+    assert "no vault found" in result.output
+    assert not config.get_db_path().exists()   # no empty DB left behind
+
+
+def test_unlock_vault_returns_working_kek():
+    from childvault.cli import unlock_vault
+    _make_vault()
+    conn, kek = unlock_vault(PW)
+    try:
+        wrapped = vc.wrap_key(kek, vc.generate_data_key(), "F-x")
+        assert len(wrapped) == vc.WRAPPED_LEN
+    finally:
+        conn.close()
