@@ -70,7 +70,7 @@ def test_mismatched_confirmation_refused():
 
 # ---------------------------------------------------------------- stub commands
 
-ALL_COMMANDS = ["init", "status", "keygen", "fingerprint", "add-file", "open-file", "revoke", "pseudonymize",
+ALL_COMMANDS = ["init", "status", "web", "keygen", "fingerprint", "add-file", "open-file", "revoke", "pseudonymize",
                 "lookup", "share", "import-bundle", "verify", "audit"]
 
 
@@ -323,3 +323,9 @@ def test_fingerprint_rejects_bad_file(tmp_path):
     result = runner.invoke(app, ["fingerprint", str(junk)])
     assert result.exit_code == 1
     assert "cannot read public key" in result.output
+
+
+def test_web_refuses_without_vault():
+    result = runner.invoke(app, ["web"])
+    assert result.exit_code == 1
+    assert "no vault found" in result.output

@@ -245,6 +245,22 @@ def lookup(
 
 
 @app.command()
+def web(
+    port: int = typer.Option(8000, "--port", min=1024, max=65535, help="Port on 127.0.0.1."),
+) -> None:
+    """Start the local web UI at http://127.0.0.1:<port> (this computer only)."""
+    if not config.get_db_path().is_file():
+        fail(f"no vault found in {config.get_vault_dir()} - run `childvault init` first")
+
+    import uvicorn                                  # imported here: only this command needs it
+    from .web.app import create_app
+
+    typer.echo(f"ChildVault web UI on http://127.0.0.1:{port}  (Ctrl+C to stop)")
+    uvicorn.run(create_app(), host="127.0.0.1", port=port, log_level="warning",
+                server_header=False)       # don't advertise the server software
+
+
+@app.command()
 def keygen(
     out: Path = typer.Option(
         Path("reviewer"), "--out",

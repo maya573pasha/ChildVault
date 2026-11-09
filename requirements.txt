@@ -6,4 +6,5 @@ fastapi
 uvicorn
 python-multipart
 pytest
+httpx            # needed by FastAPI's TestClient in the web tests
  
