@@ -2,6 +2,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
+from childvault import db
 from childvault import keyshare as ks
 from childvault import vault_crypto as vc
 
@@ -132,3 +133,80 @@ def test_load_public_key_missing_or_garbage(tmp_path):
     junk.write_text("not a key")
     with pytest.raises(ks.KeyFileError):
         ks.load_public_key(junk)
+
+
+# ---------------------------------------------------------------- many files
+
+
+FAST = {"n": 2 ** 10, "r": 8, "p": 1}
+
+
+@pytest.fixture
+def vault(tmp_path):
+    """Temp DB with three file records; returns (conn, kek, {file_id: data_key})."""
+    conn = db.connect(tmp_path / "v.db")
+    db.create_schema(conn)
+    kek = vc.derive_kek("pw", b"s" * 16, FAST)
+    keys = {}
+    for fid in ("F-1", "F-2", "F-3"):
+        dk = vc.generate_data_key()
+        keys[fid] = dk
+        db.add_file_record(conn, fid, vc.wrap_key(kek, dk, fid), "csv", "csv", "owner")
+    yield conn, kek, keys
+    conn.close()
+
+
+def test_share_two_of_three_files(vault, reviewer):
+    conn, kek, keys = vault
+    entries = ks.wrap_files_for_reviewer(conn, kek, ["F-1", "F-3"], reviewer[1])
+    assert set(entries) == {"F-1", "F-3"}                     # F-2 NOT included (scoped)
+    assert entries["F-1"]["key_version"] == 1
+    got = ks.unwrap_files_for_reviewer(entries, reviewer[0])
+    assert got == {"F-1": keys["F-1"], "F-3": keys["F-3"]}
+
+
+def test_duplicates_removed_order_kept(vault, reviewer):
+    conn, kek, _ = vault
+    entries = ks.wrap_files_for_reviewer(conn, kek, ["F-3", "F-1", "F-3"], reviewer[1])
+    assert list(entries) == ["F-3", "F-1"]
+
+
+def test_empty_selection_refused(vault, reviewer):
+    conn, kek, _ = vault
+    with pytest.raises(ks.KeyShareError):
+        ks.wrap_files_for_reviewer(conn, kek, [], reviewer[1])
+
+
+def test_unknown_file_refused(vault, reviewer):
+    conn, kek, _ = vault
+    with pytest.raises(db.FileNotInVaultError):
+        ks.wrap_files_for_reviewer(conn, kek, ["F-1", "F-nope"], reviewer[1])
+
+
+def test_wrong_kek_cannot_share(vault, reviewer):
+    conn, _, _ = vault
+    other = vc.derive_kek("other", b"s" * 16, FAST)
+    with pytest.raises(ks.KeyShareError):
+        ks.wrap_files_for_reviewer(conn, other, ["F-1"], reviewer[1])
+
+
+def test_entries_cannot_be_swapped_between_files(vault, reviewer):
+    """Attacker relabels F-1's wrapped key as F-3's: must be rejected."""
+    conn, kek, _ = vault
+    entries = ks.wrap_files_for_reviewer(conn, kek, ["F-1", "F-3"], reviewer[1])
+    entries["F-1"], entries["F-3"] = entries["F-3"], entries["F-1"]
+    with pytest.raises(ks.ShareUnwrapError):
+        ks.unwrap_files_for_reviewer(entries, reviewer[0])
+
+
+def test_wrong_reviewer_gets_nothing(vault, reviewer):
+    conn, kek, _ = vault
+    entries = ks.wrap_files_for_reviewer(conn, kek, ["F-1"], reviewer[1])
+    with pytest.raises(ks.ShareUnwrapError):
+        ks.unwrap_files_for_reviewer(entries, ks.generate_reviewer_keypair()[0])
+
+
+@pytest.mark.parametrize("bad", [{}, {"wrapped": "zz"}, {"wrapped": None}])
+def test_malformed_entry_rejected(reviewer, bad):
+    with pytest.raises(ks.ShareUnwrapError):
+        ks.unwrap_files_for_reviewer({"F-1": bad}, reviewer[0])

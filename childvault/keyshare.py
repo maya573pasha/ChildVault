@@ -22,6 +22,8 @@ the reviewer must check that signature before trusting any wrapped key.
 
 import hashlib
 import os
+import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
 
 from cryptography.exceptions import InvalidTag
@@ -30,6 +32,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from . import db
 from . import vault_crypto as vc
 
 PUB_LEN = 32
@@ -159,3 +162,59 @@ def load_private_key(path: str | Path, passphrase: str) -> X25519PrivateKey:
     if not isinstance(key, X25519PrivateKey):
         raise KeyFileError(f"{path} is not an X25519 private key")
     return key
+
+
+# --------------------------------------------------------------------------
+# Many files at once (used by `share` / `import-bundle`)
+# --------------------------------------------------------------------------
+
+def wrap_files_for_reviewer(
+    conn: sqlite3.Connection,
+    kek: bytes,
+    file_ids: Iterable[str],
+    reviewer_pub: X25519PublicKey,
+) -> dict[str, dict]:
+    """
+    Owner side. For each chosen file: unwrap its data key with the KEK,
+    then wrap it again to the reviewer. Only the listed files are included
+    - this is what makes sharing SCOPED.
+
+    Returns {file_id: {"key_version": n, "wrapped": "<hex>"}}, ready to be
+    put into a share bundle (which Aaleen's code then signs).
+    """
+    ids = list(dict.fromkeys(file_ids))          # remove duplicates, keep order
+    if not ids:
+        raise KeyShareError("choose at least one file to share")
+
+    out = {}
+    for file_id in ids:
+        row = db.get_file(conn, file_id)          # raises FileNotInVaultError
+        try:
+            data_key = vc.unwrap_key(kek, row["wrapped_key"], file_id)
+        except vc.KeyUnwrapError:
+            raise KeyShareError(f"stored key for {file_id} failed authentication") from None
+        out[file_id] = {
+            "key_version": row["key_version"],
+            "wrapped": wrap_for_reviewer(data_key, reviewer_pub, file_id).hex(),
+        }
+    return out
+
+
+def unwrap_files_for_reviewer(
+    entries: dict[str, dict],
+    reviewer_priv: X25519PrivateKey,
+) -> dict[str, bytes]:
+    """
+    Reviewer side. ONLY call this after the bundle's Ed25519 signature and
+    expiry have been checked - otherwise the keys could come from anyone.
+
+    Returns {file_id: data_key}. Fails as a whole if any one entry is bad.
+    """
+    keys = {}
+    for file_id, entry in entries.items():
+        try:
+            blob = bytes.fromhex(entry["wrapped"])
+        except (KeyError, TypeError, ValueError):
+            raise ShareUnwrapError(f"entry for {file_id} is malformed") from None
+        keys[file_id] = unwrap_for_reviewer(blob, reviewer_priv, file_id)
+    return keys
