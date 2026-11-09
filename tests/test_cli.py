@@ -64,3 +64,56 @@ def test_short_passphrase_refused(temp_vault):
 def test_mismatched_confirmation_refused():
     result = runner.invoke(app, ["init"], input=f"{PW}\nsomething else\n{PW}\n{PW}\n")
     assert "do not match" in result.output.lower()
+
+
+# ---------------------------------------------------------------- stub commands
+
+ALL_COMMANDS = ["init", "add-file", "open-file", "revoke", "pseudonymize",
+                "lookup", "share", "import-bundle", "verify", "audit"]
+
+
+def test_help_lists_every_command():
+    output = runner.invoke(app, ["--help"]).output
+    for name in ALL_COMMANDS:
+        assert name in output
+
+
+@pytest.mark.parametrize("args, owner", [
+    (["open-file", "F-1", "--out", "x.mp4"], "Aaleen"),
+    (["revoke", "F-1"], "Aaleen"),
+    (["pseudonymize", "Test Child"], "Mariyam"),
+    (["lookup", "CH-4F7A"], "Mariyam"),
+    (["share", "F-1", "F-2", "--reviewer-key", "r.pub", "--expires", "2026-12-31", "--out", "b.json"], "Mariyam"),
+    (["import-bundle", "b.json"], "Mariyam"),
+    (["verify"], "Laiba"),
+    (["audit", "show"], "Laiba"),
+])
+def test_stub_says_not_implemented_with_owner(args, owner):
+    result = runner.invoke(app, args)
+    assert result.exit_code == 1
+    assert "not implemented" in result.output
+    assert owner in result.output
+
+
+def test_add_file_stub(tmp_path):
+    f = tmp_path / "clip.mp4"
+    f.write_bytes(b"x")
+    result = runner.invoke(app, ["add-file", str(f), "--type", "video", "--child", "CH-4F7A"])
+    assert result.exit_code == 1 and "Aaleen" in result.output
+
+
+def test_add_file_rejects_missing_file():
+    result = runner.invoke(app, ["add-file", "does-not-exist.mp4"])
+    assert result.exit_code == 2        # Typer/Click usage error, before our code runs
+
+
+def test_add_file_rejects_unknown_type(tmp_path):
+    f = tmp_path / "a.bin"
+    f.write_bytes(b"x")
+    result = runner.invoke(app, ["add-file", str(f), "--type", "exe"])
+    assert result.exit_code == 2
+
+
+def test_file_type_choices_match_database():
+    from childvault.cli import FileType
+    assert tuple(t.value for t in FileType) == db.FILE_TYPES
