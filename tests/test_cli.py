@@ -3,6 +3,7 @@ from typer.testing import CliRunner
 
 from childvault import __version__, config, db
 from childvault import identity as idm
+from childvault import keyshare as ks
 from childvault import vault_crypto as vc
 from childvault.cli import app
 
@@ -69,7 +70,7 @@ def test_mismatched_confirmation_refused():
 
 # ---------------------------------------------------------------- stub commands
 
-ALL_COMMANDS = ["init", "status", "add-file", "open-file", "revoke", "pseudonymize",
+ALL_COMMANDS = ["init", "status", "keygen", "fingerprint", "add-file", "open-file", "revoke", "pseudonymize",
                 "lookup", "share", "import-bundle", "verify", "audit"]
 
 
@@ -267,3 +268,58 @@ def test_tampered_map_is_reported():
     result = runner.invoke(app, ["pseudonymize", "--name", "X", "--passphrase", PW])
     assert result.exit_code == 1
     assert "integrity check" in result.output
+
+
+# ---------------------------------------------------------------- keygen / fingerprint
+
+RPW = "reviewer passphrase"
+
+
+def test_keygen_creates_both_files(tmp_path):
+    base = tmp_path / "alice"
+    result = runner.invoke(app, ["keygen", "--out", str(base)], input=f"{RPW}\n{RPW}\n")
+    assert result.exit_code == 0, result.output
+    priv = ks.load_private_key(tmp_path / "alice.key", RPW)
+    pub = ks.load_public_key(tmp_path / "alice.pub")
+    assert ks.fingerprint(priv.public_key()) == ks.fingerprint(pub)
+    assert ks.fingerprint(pub) in result.output
+    assert RPW not in result.output
+
+
+def test_keygen_refuses_to_overwrite(tmp_path):
+    base = tmp_path / "alice"
+    runner.invoke(app, ["keygen", "--out", str(base), "--passphrase", RPW])
+    before = (tmp_path / "alice.key").read_bytes()
+    result = runner.invoke(app, ["keygen", "--out", str(base), "--passphrase", RPW])
+    assert result.exit_code == 1
+    assert "refusing to overwrite" in result.output
+    assert (tmp_path / "alice.key").read_bytes() == before
+
+
+def test_keygen_short_passphrase(tmp_path):
+    result = runner.invoke(app, ["keygen", "--out", str(tmp_path / "a"), "--passphrase", "short"])
+    assert result.exit_code == 1
+    assert not (tmp_path / "a.key").exists()
+
+
+def test_keygen_does_not_need_a_vault(tmp_path, temp_vault):
+    """A reviewer usually has no vault of their own."""
+    result = runner.invoke(app, ["keygen", "--out", str(tmp_path / "r"), "--passphrase", RPW])
+    assert result.exit_code == 0, result.output
+    assert not temp_vault.exists()
+
+
+def test_fingerprint_command_matches_keygen(tmp_path):
+    base = tmp_path / "bob"
+    out = runner.invoke(app, ["keygen", "--out", str(base), "--passphrase", RPW]).output
+    result = runner.invoke(app, ["fingerprint", str(tmp_path / "bob.pub")])
+    assert result.exit_code == 0
+    assert result.output.strip() in out
+
+
+def test_fingerprint_rejects_bad_file(tmp_path):
+    junk = tmp_path / "junk.pub"
+    junk.write_text("hello")
+    result = runner.invoke(app, ["fingerprint", str(junk)])
+    assert result.exit_code == 1
+    assert "cannot read public key" in result.output

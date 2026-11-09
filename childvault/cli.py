@@ -15,6 +15,7 @@ import typer
 
 from . import __version__, config, db
 from . import identity as idm
+from . import keyshare as ks
 from . import vault_crypto as vc
 
 MIN_PASSPHRASE_LEN = 8
@@ -241,6 +242,49 @@ def lookup(
 
     typer.echo(f"{cid}  ->  {name}")
     typer.echo(f"Files in vault for this child: {n_files}")
+
+
+@app.command()
+def keygen(
+    out: Path = typer.Option(
+        Path("reviewer"), "--out",
+        help="Base name: writes <out>.key (private, encrypted) and <out>.pub (public).",
+    ),
+    passphrase: str = typer.Option(
+        ..., prompt="Choose a passphrase for your private key", hide_input=True,
+        confirmation_prompt=True, help="Protects the private key file.",
+    ),
+) -> None:
+    """(Reviewer) Create an X25519 key pair for receiving share bundles."""
+    if len(passphrase) < MIN_PASSPHRASE_LEN:
+        fail(f"passphrase must be at least {MIN_PASSPHRASE_LEN} characters")
+
+    key_path = out.with_name(out.name + ".key")
+    pub_path = out.with_name(out.name + ".pub")
+    for p in (key_path, pub_path):
+        if p.exists():
+            fail(f"{p} already exists - refusing to overwrite a key")
+
+    priv, pub = ks.generate_reviewer_keypair()
+    ks.save_private_key(priv, key_path, passphrase)
+    ks.save_public_key(pub, pub_path)
+
+    typer.secho(f"Private key: {key_path}  (keep secret)", fg=typer.colors.GREEN)
+    typer.secho(f"Public key:  {pub_path}  (send this to the vault owner)", fg=typer.colors.GREEN)
+    typer.echo(f"Fingerprint: {ks.fingerprint(pub)}")
+    typer.echo("Read this fingerprint to the owner by phone or in person.")
+
+
+@app.command()
+def fingerprint(
+    pub_key: Path = typer.Argument(..., help="An X25519 public key file (.pub)."),
+) -> None:
+    """Show the fingerprint of a public key, to confirm it really is the reviewer's."""
+    try:
+        pub = ks.load_public_key(pub_key)
+    except ks.KeyFileError as exc:
+        fail(str(exc))
+    typer.echo(ks.fingerprint(pub))
 
 
 @app.command()
