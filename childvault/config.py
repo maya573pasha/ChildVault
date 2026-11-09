@@ -8,6 +8,7 @@ vault at a temporary folder).
 Layout of a vault folder:
     vault_data/
         childvault.db      SQLite: vault header, file metadata, audit log
+        identity_map.enc   encrypted pseudonym -> real name map (kept apart from the DB)
         files/             encrypted file blobs (<file_id>.enc)
 """
 
@@ -23,6 +24,7 @@ DEFAULT_VAULT_DIR = "vault_data"
 
 DB_FILENAME = "childvault.db"
 FILES_DIRNAME = "files"
+IDENTITY_MAP_FILENAME = "identity_map.enc"
 
 
 def get_vault_dir() -> Path:
@@ -38,6 +40,11 @@ def get_db_path() -> Path:
 def get_files_dir() -> Path:
     """Folder where encrypted file blobs are stored."""
     return get_vault_dir() / FILES_DIRNAME
+
+
+def get_identity_map_path() -> Path:
+    """Encrypted ID-name map. A separate file so the DB alone reveals no names."""
+    return get_vault_dir() / IDENTITY_MAP_FILENAME
 
 
 def ensure_vault_dirs() -> Path:

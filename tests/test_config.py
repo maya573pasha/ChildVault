@@ -13,6 +13,7 @@ def test_env_var_overrides_vault_dir(monkeypatch, tmp_path):
     assert config.get_vault_dir() == tmp_path
     assert config.get_db_path() == tmp_path / "childvault.db"
     assert config.get_files_dir() == tmp_path / "files"
+    assert config.get_identity_map_path() == tmp_path / "identity_map.enc"
 
 
 def test_ensure_vault_dirs_creates_folders(monkeypatch, tmp_path):
