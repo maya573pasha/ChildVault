@@ -1,10 +1,10 @@
 """
 db.py - SQLite storage for ChildVault.
 
-Tables (added one at a time):
+Tables:
   vault_meta   key/value settings for the whole vault, incl. the vault header
-  files        (next step) one row per encrypted file
-  audit_log    (later step) hash-chained record of every action
+  files        one row per encrypted file (pseudonym only, no names)
+  audit_log    hash-chained, append-only record of every action
 
 Nothing secret is stored in plaintext here: the vault header holds only the
 salt, scrypt parameters and a check value, which are safe to be seen.
@@ -44,7 +44,39 @@ CREATE TABLE IF NOT EXISTS files (
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_child ON files (child_id);
+
+-- Hash-chained audit log. Laiba's audit module computes the hashes;
+-- this table only stores them. file_id is NOT a foreign key on purpose:
+-- failed attempts on unknown IDs must still be logged.
+CREATE TABLE IF NOT EXISTS audit_log (
+    seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT NOT NULL,
+    actor       TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    file_id     TEXT,
+    details     TEXT,
+    prev_hash   TEXT NOT NULL CHECK (length(prev_hash) = 64),
+    entry_hash  TEXT NOT NULL UNIQUE CHECK (length(entry_hash) = 64)
+);
+
+-- Append-only guard against bugs and casual edits through the app.
+-- NOT the real protection (anyone with the file can drop these triggers);
+-- the hash chain is what actually detects tampering.
+CREATE TRIGGER IF NOT EXISTS audit_log_no_update
+BEFORE UPDATE ON audit_log
+BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS audit_log_no_delete
+BEFORE DELETE ON audit_log
+BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only');
+END;
 """
+
+# prev_hash of the very first log entry (there is nothing before it).
+GENESIS_HASH = "0" * 64
 
 HEADER_KEY = "vault_header"
 
@@ -178,3 +210,42 @@ def list_files(conn: sqlite3.Connection, child_id: str | None = None) -> list[sq
     return conn.execute(
         "SELECT * FROM files WHERE child_id = ? ORDER BY added_at, file_id", (child_id,)
     ).fetchall()
+
+
+# --------------------------------------------------------------------------
+# audit_log table (storage only - hashing lives in Laiba's audit module)
+# --------------------------------------------------------------------------
+
+def append_audit_row(
+    conn: sqlite3.Connection,
+    ts: str,
+    actor: str,
+    action: str,
+    prev_hash: str,
+    entry_hash: str,
+    file_id: str | None = None,
+    details: dict | None = None,
+) -> int:
+    """Insert one log entry and return its sequence number."""
+    try:
+        with conn:
+            cur = conn.execute(
+                """INSERT INTO audit_log (ts, actor, action, file_id, details, prev_hash, entry_hash)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (ts, actor, action, file_id,
+                 json.dumps(details, sort_keys=True) if details is not None else None,
+                 prev_hash, entry_hash),
+            )
+    except sqlite3.IntegrityError as exc:
+        raise VaultDBError(f"could not append audit entry: {exc}") from None
+    return cur.lastrowid
+
+
+def get_audit_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every log entry in sequence order (for `verify` and `audit show`)."""
+    return conn.execute("SELECT * FROM audit_log ORDER BY seq").fetchall()
+
+
+def get_last_audit_row(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    """The newest entry, or None if the log is empty."""
+    return conn.execute("SELECT * FROM audit_log ORDER BY seq DESC LIMIT 1").fetchone()

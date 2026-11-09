@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 
 from childvault import db
@@ -116,3 +118,66 @@ def test_list_files_filter_by_child(conn):
 def test_files_table_has_no_name_columns(conn):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(files)")}
     assert not cols & {"name", "child_name", "original_name", "filename"}
+
+
+# ---------------------------------------------------------------- audit_log table
+
+H1, H2, H3 = "a" * 64, "b" * 64, "c" * 64
+
+
+def _append(conn, prev, entry, **kw):
+    return db.append_audit_row(conn, db.utc_now(), "owner", kw.pop("action", "open"), prev, entry, **kw)
+
+
+def test_audit_log_empty_at_start(conn):
+    assert db.get_audit_rows(conn) == []
+    assert db.get_last_audit_row(conn) is None
+
+
+def test_append_and_read_in_order(conn):
+    s1 = _append(conn, db.GENESIS_HASH, H1, action="init")
+    s2 = _append(conn, H1, H2, file_id="F-1", details={"b": 2, "a": 1})
+    assert s2 == s1 + 1
+    rows = db.get_audit_rows(conn)
+    assert [r["entry_hash"] for r in rows] == [H1, H2]
+    assert rows[1]["details"] == '{"a": 1, "b": 2}'   # sorted keys -> stable for hashing
+    assert db.get_last_audit_row(conn)["entry_hash"] == H2
+
+
+def test_unknown_file_id_can_still_be_logged(conn):
+    _append(conn, db.GENESIS_HASH, H1, action="open-denied", file_id="F-does-not-exist")
+    assert db.get_last_audit_row(conn)["file_id"] == "F-does-not-exist"
+
+
+def test_bad_hash_length_rejected(conn):
+    with pytest.raises(db.VaultDBError):
+        _append(conn, "short", H1)
+
+
+def test_duplicate_entry_hash_rejected(conn):
+    _append(conn, db.GENESIS_HASH, H1)
+    with pytest.raises(db.VaultDBError):
+        _append(conn, H1, H1)
+
+
+def test_update_blocked_by_trigger(conn):
+    _append(conn, db.GENESIS_HASH, H1)
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        with conn:
+            conn.execute("UPDATE audit_log SET actor = 'attacker'")
+
+
+def test_delete_blocked_by_trigger(conn):
+    _append(conn, db.GENESIS_HASH, H1)
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        with conn:
+            conn.execute("DELETE FROM audit_log")
+
+
+def test_attacker_with_file_access_can_drop_trigger(conn):
+    """Shows WHY the trigger is not enough: the hash chain must catch this."""
+    _append(conn, db.GENESIS_HASH, H1)
+    conn.execute("DROP TRIGGER audit_log_no_update")
+    with conn:
+        conn.execute("UPDATE audit_log SET actor = 'attacker'")
+    assert db.get_last_audit_row(conn)["actor"] == "attacker"
