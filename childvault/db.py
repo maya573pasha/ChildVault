@@ -11,18 +11,39 @@ salt, scrypt parameters and a check value, which are safe to be seen.
 """
 
 import json
+import secrets
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config
+from .vault_crypto import WRAPPED_LEN
 
 SCHEMA_VERSION = 1
 
-SCHEMA = """
+FILE_TYPES = ("video", "csv", "annotation", "other")
+
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS vault_meta (
     key    TEXT PRIMARY KEY,
     value  TEXT NOT NULL
 );
+
+-- One row per encrypted file. Deliberately NO original filename and NO
+-- child name: both can identify a child. Only the pseudonym is stored.
+CREATE TABLE IF NOT EXISTS files (
+    file_id          TEXT PRIMARY KEY,
+    child_id         TEXT,
+    file_type        TEXT NOT NULL CHECK (file_type IN {FILE_TYPES}),
+    extension        TEXT NOT NULL,
+    wrapped_key      BLOB NOT NULL CHECK (length(wrapped_key) = {WRAPPED_LEN}),
+    key_version      INTEGER NOT NULL DEFAULT 1,
+    plaintext_size   INTEGER,
+    added_by         TEXT NOT NULL,
+    added_at         TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_files_child ON files (child_id);
 """
 
 HEADER_KEY = "vault_header"
@@ -38,6 +59,10 @@ class VaultNotInitializedError(VaultDBError):
 
 class VaultAlreadyInitializedError(VaultDBError):
     """A vault header already exists; refusing to overwrite it."""
+
+
+class FileNotInVaultError(VaultDBError):
+    """No file with that ID is stored in the vault."""
 
 
 def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
@@ -92,3 +117,64 @@ def load_header(conn: sqlite3.Connection) -> dict:
 
 def is_initialized(conn: sqlite3.Connection) -> bool:
     return get_meta(conn, HEADER_KEY) is not None
+
+
+# --------------------------------------------------------------------------
+# Helpers shared by several modules
+# --------------------------------------------------------------------------
+
+def utc_now() -> str:
+    """Current time in UTC as ISO-8601 text, e.g. 2026-11-09T14:28:03+00:00."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def new_file_id() -> str:
+    """Random, meaningless file ID such as F-3f9a1c0b7e2d4a65 (64 random bits)."""
+    return "F-" + secrets.token_hex(8)
+
+
+# --------------------------------------------------------------------------
+# files table
+# --------------------------------------------------------------------------
+
+def add_file_record(
+    conn: sqlite3.Connection,
+    file_id: str,
+    wrapped_key: bytes,
+    file_type: str,
+    extension: str,
+    added_by: str,
+    child_id: str | None = None,
+    plaintext_size: int | None = None,
+) -> None:
+    """Insert metadata for a newly encrypted file. Raises VaultDBError on bad input."""
+    if file_type not in FILE_TYPES:
+        raise VaultDBError(f"file_type must be one of {FILE_TYPES}")
+    try:
+        with conn:
+            conn.execute(
+                """INSERT INTO files (file_id, child_id, file_type, extension, wrapped_key,
+                                      plaintext_size, added_by, added_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (file_id, child_id, file_type, extension.lower().lstrip("."),
+                 wrapped_key, plaintext_size, added_by, utc_now()),
+            )
+    except sqlite3.IntegrityError as exc:
+        raise VaultDBError(f"could not add file record: {exc}") from None
+
+
+def get_file(conn: sqlite3.Connection, file_id: str) -> sqlite3.Row:
+    """Return the row for one file, or raise FileNotInVaultError."""
+    row = conn.execute("SELECT * FROM files WHERE file_id = ?", (file_id,)).fetchone()
+    if row is None:
+        raise FileNotInVaultError(f"no file with id {file_id}")
+    return row
+
+
+def list_files(conn: sqlite3.Connection, child_id: str | None = None) -> list[sqlite3.Row]:
+    """All files, oldest first; optionally only those of one pseudonymous child."""
+    if child_id is None:
+        return conn.execute("SELECT * FROM files ORDER BY added_at, file_id").fetchall()
+    return conn.execute(
+        "SELECT * FROM files WHERE child_id = ? ORDER BY added_at, file_id", (child_id,)
+    ).fetchall()

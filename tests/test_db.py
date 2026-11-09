@@ -58,3 +58,61 @@ def test_header_persists_after_reopen(tmp_path):
     c2 = db.connect(path)
     assert db.is_initialized(c2)
     c2.close()
+
+
+# ---------------------------------------------------------------- files table
+
+def _wrapped():
+    kek = vc.derive_kek("pw", b"s" * 16, FAST)
+    return vc.wrap_key(kek, vc.generate_data_key(), "F-test")
+
+
+def test_new_file_ids_are_random_and_well_formed():
+    ids = {db.new_file_id() for _ in range(100)}
+    assert len(ids) == 100
+    assert all(i.startswith("F-") and len(i) == 18 for i in ids)
+
+
+def test_add_and_get_file(conn):
+    w = _wrapped()
+    db.add_file_record(conn, "F-1", w, "video", ".MP4", "owner", child_id="CH-4F7A", plaintext_size=10)
+    row = db.get_file(conn, "F-1")
+    assert row["wrapped_key"] == w
+    assert row["child_id"] == "CH-4F7A"
+    assert row["extension"] == "mp4"        # normalised
+    assert row["key_version"] == 1          # default
+    assert row["added_at"].endswith("+00:00")
+
+
+def test_get_missing_file(conn):
+    with pytest.raises(db.FileNotInVaultError):
+        db.get_file(conn, "F-nope")
+
+
+def test_duplicate_file_id_rejected(conn):
+    db.add_file_record(conn, "F-1", _wrapped(), "csv", "csv", "owner")
+    with pytest.raises(db.VaultDBError):
+        db.add_file_record(conn, "F-1", _wrapped(), "csv", "csv", "owner")
+
+
+def test_bad_file_type_rejected(conn):
+    with pytest.raises(db.VaultDBError):
+        db.add_file_record(conn, "F-1", _wrapped(), "exe", "exe", "owner")
+
+
+def test_wrong_size_wrapped_key_rejected_by_database(conn):
+    with pytest.raises(db.VaultDBError):
+        db.add_file_record(conn, "F-1", b"too short", "csv", "csv", "owner")
+
+
+def test_list_files_filter_by_child(conn):
+    db.add_file_record(conn, "F-1", _wrapped(), "video", "mp4", "owner", child_id="CH-AAAA")
+    db.add_file_record(conn, "F-2", _wrapped(), "csv", "csv", "owner", child_id="CH-BBBB")
+    db.add_file_record(conn, "F-3", _wrapped(), "annotation", "eaf", "owner", child_id="CH-AAAA")
+    assert len(db.list_files(conn)) == 3
+    assert [r["file_id"] for r in db.list_files(conn, "CH-AAAA")] == ["F-1", "F-3"]
+
+
+def test_files_table_has_no_name_columns(conn):
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(files)")}
+    assert not cols & {"name", "child_name", "original_name", "filename"}
