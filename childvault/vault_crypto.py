@@ -1,18 +1,33 @@
 """
-vault_crypto.py - ChildVault, Phase 1 (key management + interface stubs)
+vault_crypto.py - ChildVault encryption engine
 
-Scope of this phase
+
+Phase 1 - key management
   - passphrase -> scrypt -> 256-bit key-encryption key (KEK)
   - vault header (salt, scrypt params, passphrase check value)
   - per-file random 256-bit data key
   - wrap / unwrap of data keys under the KEK (bound to the file ID)
-  - encrypt_file / decrypt_file STUBS so Mariyam and Laiba can code against
-    a fixed interface; the real chunked AES-256-GCM goes in here in Phase 2.
+
+Phase 2 - file encryption
+  - streaming AES-256-GCM in 1 MB chunks
+  - every chunk's authenticated data binds: file header, file ID,
+    chunk number, and a "final chunk" flag
+  - any bit-flip, chunk swap/duplication, truncation, extension, wrong key
+    or wrong file ID raises IntegrityError and leaves no output file
+
+Encrypted file layout
+  header  : magic "CVLT" (4) | format version (1) | chunk size (4, big-endian)
+  chunks  : repeated  nonce (12) | ciphertext (<= chunk size) | tag (16)
+  All chunks hold exactly `chunk size` plaintext bytes except the last one.
+  An empty file is stored as a single, empty, final chunk.
+
+Chunk AAD = header | len(file_id) (2) | file_id | chunk number (8) | final flag (1)
 
 Everything uses the `cryptography` library only.
 """
 
 import os
+import struct
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -32,6 +47,14 @@ _CHECK_PLAINTEXT = b"childvault-kek-check-v1"
 _CHECK_AAD = b"childvault:vault-check"
 _WRAP_AAD_PREFIX = b"childvault:wrap:"
 
+# File format (Phase 2)
+MAGIC = b"CVLT"
+FORMAT_VERSION = 1
+CHUNK_SIZE = 1024 * 1024               # 1 MB
+MAX_CHUNK_SIZE = 64 * 1024 * 1024      # sanity cap when reading a header
+_HEADER = struct.Struct(">4sBI")       # magic, version, chunk size
+HEADER_LEN = _HEADER.size              # 9 bytes
+
 
 class VaultCryptoError(Exception):
     """Base class for all errors raised by this module."""
@@ -43,6 +66,10 @@ class WrongPassphraseError(VaultCryptoError):
 
 class KeyUnwrapError(VaultCryptoError):
     """A wrapped key failed authentication (wrong KEK, wrong file ID, or tampered)."""
+
+
+class IntegrityError(VaultCryptoError):
+    """An encrypted file failed verification (modified, truncated, reordered, wrong key or ID)."""
 
 
 # --------------------------------------------------------------------------
@@ -145,28 +172,124 @@ def _check_len(name: str, value: bytes, expected: int) -> None:
 
 
 # --------------------------------------------------------------------------
-# File encryption interface (STUBS - implemented in Phase 2)
+# Chunked file encryption (Phase 2)
 # --------------------------------------------------------------------------
 
-def encrypt_file(src_path: str, dst_path: str, data_key: bytes, file_id: str) -> None:
+def encrypt_file(src_path, dst_path, data_key: bytes, file_id: str,
+                 chunk_size: int = CHUNK_SIZE) -> None:
     """
-    Encrypt src_path into dst_path with 1 MB AES-256-GCM chunks, streaming.
+    Encrypt src_path into dst_path with AES-256-GCM chunks, streaming.
 
-    Contract for other modules:
-      - raises nothing on success, returns None
-      - the chunk number is bound into each chunk's authenticated data
-      - dst_path is only complete if this function returns normally
+    The output is written to "<dst_path>.part" and moved into place only after
+    the last chunk is written, so dst_path is either complete or absent.
+    `chunk_size` exists so tests can use small chunks; production uses 1 MB.
     """
-    raise NotImplementedError("Phase 2")
+    src_path, dst_path = os.fspath(src_path), os.fspath(dst_path)
+    _check_len("data_key", data_key, KEY_LEN)
+    _check_file_id(file_id)
+    if not 1 <= chunk_size <= MAX_CHUNK_SIZE:
+        raise ValueError(f"chunk_size must be between 1 and {MAX_CHUNK_SIZE}")
+
+    header = _HEADER.pack(MAGIC, FORMAT_VERSION, chunk_size)
+    aead = AESGCM(data_key)
+    tmp_path = dst_path + ".part"
+    try:
+        with open(src_path, "rb") as src, open(tmp_path, "wb") as dst:
+            dst.write(header)
+            current = src.read(chunk_size)
+            index = 0
+            while True:
+                # Read one chunk ahead: the chunk is "final" iff nothing follows it.
+                # An empty file therefore becomes one empty final chunk.
+                nxt = src.read(chunk_size)
+                final = not nxt
+                nonce = os.urandom(NONCE_LEN)
+                aad = _chunk_aad(header, file_id, index, final)
+                dst.write(nonce + aead.encrypt(nonce, current, aad))
+                if final:
+                    break
+                current = nxt
+                index += 1
+            dst.flush()
+            os.fsync(dst.fileno())
+        os.replace(tmp_path, dst_path)
+    except BaseException:
+        _remove_quietly(tmp_path)
+        raise
 
 
-def decrypt_file(src_path: str, dst_path: str, data_key: bytes, file_id: str) -> None:
+def decrypt_file(src_path, dst_path, data_key: bytes, file_id: str) -> None:
     """
     Decrypt src_path into dst_path, streaming.
 
-    Contract for other modules:
-      - raises IntegrityError (to be added in Phase 2) if any chunk was
-        flipped, swapped, removed or the file was truncated
-      - never leaves partially trusted plaintext at dst_path on failure
+    Raises IntegrityError if any chunk was flipped, swapped, duplicated,
+    removed or appended, if the header was edited, or if the key / file ID
+    is wrong. Plaintext is written to "<dst_path>.part" and only moved to
+    dst_path after the final chunk verifies; on failure the .part file is
+    deleted (it is removed, not securely wiped) and an existing dst_path is
+    left untouched.
     """
-    raise NotImplementedError("Phase 2")
+    src_path, dst_path = os.fspath(src_path), os.fspath(dst_path)
+    _check_len("data_key", data_key, KEY_LEN)
+    _check_file_id(file_id)
+
+    aead = AESGCM(data_key)
+    tmp_path = dst_path + ".part"
+    try:
+        with open(src_path, "rb") as src:
+            header = src.read(HEADER_LEN)
+            if len(header) != HEADER_LEN:
+                raise IntegrityError("file is too short to be a ChildVault file")
+            magic, version, chunk_size = _HEADER.unpack(header)
+            if magic != MAGIC or version != FORMAT_VERSION:
+                raise IntegrityError("not a ChildVault file, or unsupported version")
+            if not 1 <= chunk_size <= MAX_CHUNK_SIZE:
+                raise IntegrityError("invalid chunk size in header")
+
+            record_len = NONCE_LEN + chunk_size + TAG_LEN
+            with open(tmp_path, "wb") as dst:
+                current = src.read(record_len)
+                if not current:
+                    raise IntegrityError("file has no chunks (truncated)")
+                index = 0
+                while True:
+                    nxt = src.read(record_len)
+                    final = not nxt
+                    if len(current) < NONCE_LEN + TAG_LEN:
+                        raise IntegrityError(f"chunk {index} is truncated")
+                    aad = _chunk_aad(header, file_id, index, final)
+                    try:
+                        plain = aead.decrypt(current[:NONCE_LEN], current[NONCE_LEN:], aad)
+                    except InvalidTag:
+                        raise IntegrityError(
+                            f"chunk {index} failed authentication "
+                            "(modified, reordered, truncated, wrong key or wrong file ID)"
+                        ) from None
+                    dst.write(plain)
+                    if final:
+                        break
+                    current = nxt
+                    index += 1
+                dst.flush()
+                os.fsync(dst.fileno())
+        os.replace(tmp_path, dst_path)
+    except BaseException:
+        _remove_quietly(tmp_path)
+        raise
+
+
+def _chunk_aad(header: bytes, file_id: str, index: int, final: bool) -> bytes:
+    fid = file_id.encode("utf-8")
+    return header + struct.pack(">H", len(fid)) + fid + struct.pack(">QB", index, 1 if final else 0)
+
+
+def _check_file_id(file_id: str) -> None:
+    if not file_id or len(file_id.encode("utf-8")) > 0xFFFF:
+        raise ValueError("file_id must be 1 to 65535 bytes")
+
+
+def _remove_quietly(path: str) -> None:
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass

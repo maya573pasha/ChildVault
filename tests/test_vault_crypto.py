@@ -1,10 +1,17 @@
+import os
+
 import pytest
+from typer.testing import CliRunner
 
+from childvault import cli
 from childvault import vault_crypto as vc
-
 # Cheap scrypt params so the test suite runs fast. Production uses the defaults.
 FAST = {"n": 2 ** 10, "r": 8, "p": 1}
 
+
+# ==========================================================================
+# Phase 1: key management
+# ==========================================================================
 
 def test_derive_kek_is_deterministic_and_32_bytes():
     salt = b"s" * vc.SALT_LEN
@@ -116,8 +123,399 @@ def test_wrap_rejects_bad_key_sizes():
         vc.wrap_key(kek, b"x" * 16, "f")
 
 
-def test_file_stubs_not_implemented_yet():
-    with pytest.raises(NotImplementedError):
-        vc.encrypt_file("a", "b", b"k" * 32, "f")
-    with pytest.raises(NotImplementedError):
-        vc.decrypt_file("a", "b", b"k" * 32, "f")
+# ==========================================================================
+# Phase 2: chunked file encryption
+# ==========================================================================
+
+FID = "F-000000000001"
+CS = 64                                   # small chunk size so tests stay fast
+REC = vc.NONCE_LEN + CS + vc.TAG_LEN      # size of one full encrypted record
+HL = vc.HEADER_LEN
+OVERHEAD = vc.NONCE_LEN + vc.TAG_LEN      # per-chunk overhead
+
+
+def make(tmp_path, data, chunk_size=CS, file_id=FID):
+    """Encrypt `data`; return (data_key, path_to_encrypted_file)."""
+    src = tmp_path / "plain.bin"
+    src.write_bytes(data)
+    enc = tmp_path / "x.enc"
+    key = vc.generate_data_key()
+    vc.encrypt_file(src, enc, key, file_id, chunk_size)
+    return key, enc
+
+
+def dec(tmp_path, enc, key, file_id=FID):
+    out = tmp_path / "out.bin"
+    vc.decrypt_file(enc, out, key, file_id)
+    return out
+
+
+def split(blob):
+    """Split an encrypted file into (header, [records])."""
+    body = blob[HL:]
+    return blob[:HL], [body[i:i + REC] for i in range(0, len(body), REC)]
+
+
+def join(header, records):
+    return header + b"".join(records)
+
+
+def assert_rejected(tmp_path, enc, key, file_id=FID):
+    """Decryption must raise IntegrityError and leave no output behind."""
+    out = tmp_path / "out.bin"
+    with pytest.raises(vc.IntegrityError):
+        vc.decrypt_file(enc, out, key, file_id)
+    assert not out.exists()
+    assert not (tmp_path / "out.bin.part").exists()
+
+
+@pytest.mark.parametrize("size", [0, 1, CS - 1, CS, CS + 1, 3 * CS, 3 * CS + 5])
+def test_roundtrip_sizes(tmp_path, size):
+    data = os.urandom(size)
+    key, enc = make(tmp_path, data)
+    assert dec(tmp_path, enc, key).read_bytes() == data
+    n_chunks = max(1, -(-size // CS))
+    assert enc.stat().st_size == HL + n_chunks * OVERHEAD + size
+
+
+def test_roundtrip_with_default_1mb_chunks(tmp_path):
+    for size in (vc.CHUNK_SIZE, vc.CHUNK_SIZE + 1):
+        data = os.urandom(size)
+        src = tmp_path / "plain.bin"
+        src.write_bytes(data)
+        enc = tmp_path / "big.enc"
+        out = tmp_path / "big.out"
+        key = vc.generate_data_key()
+        vc.encrypt_file(src, enc, key, FID)
+        vc.decrypt_file(enc, out, key, FID)
+        assert out.read_bytes() == data
+        n_chunks = 1 if size == vc.CHUNK_SIZE else 2
+        assert enc.stat().st_size == HL + n_chunks * OVERHEAD + size
+        enc.unlink()
+        out.unlink()
+
+
+def test_ciphertext_is_not_plaintext_and_is_randomised(tmp_path):
+    data = b"A" * (2 * CS)
+    key, enc1 = make(tmp_path, data)
+    assert data not in enc1.read_bytes()
+    enc2 = tmp_path / "y.enc"
+    vc.encrypt_file(tmp_path / "plain.bin", enc2, key, FID, CS)
+    assert enc1.read_bytes() != enc2.read_bytes()
+
+
+def test_encrypt_leaves_no_part_file_and_cleans_up_on_error(tmp_path):
+    key = vc.generate_data_key()
+    with pytest.raises(FileNotFoundError):
+        vc.encrypt_file(tmp_path / "missing.bin", tmp_path / "x.enc", key, FID, CS)
+    assert not (tmp_path / "x.enc").exists()
+    assert not (tmp_path / "x.enc.part").exists()
+
+
+def test_encrypt_rejects_bad_arguments(tmp_path):
+    src = tmp_path / "p.bin"
+    src.write_bytes(b"hi")
+    with pytest.raises(ValueError):
+        vc.encrypt_file(src, tmp_path / "x", b"short", FID)
+    with pytest.raises(ValueError):
+        vc.encrypt_file(src, tmp_path / "x", vc.generate_data_key(), "")
+    with pytest.raises(ValueError):
+        vc.encrypt_file(src, tmp_path / "x", vc.generate_data_key(), FID, chunk_size=0)
+
+
+# ---- attack: bit-flip ----------------------------------------------------
+
+def _flip_offsets(file_len):
+    return [
+        0, 4, 5, 8,                    # header: magic, version, chunk size
+        HL,                            # first nonce
+        HL + vc.NONCE_LEN,             # first ciphertext byte
+        HL + REC - 1,                  # first tag (last byte)
+        HL + REC + 20,                 # inside the second chunk
+        file_len - 1,                  # last byte of the final chunk
+    ]
+
+
+def test_bit_flip_anywhere_is_detected(tmp_path):
+    key, enc = make(tmp_path, os.urandom(3 * CS + 5))
+    original = enc.read_bytes()
+    for offset in _flip_offsets(len(original)):
+        tampered = bytearray(original)
+        tampered[offset] ^= 0x01
+        enc.write_bytes(bytes(tampered))
+        assert_rejected(tmp_path, enc, key)
+
+
+# ---- attack: chunk swap / duplicate / splice -------------------------------
+
+def test_chunk_swap_is_detected(tmp_path):
+    key, enc = make(tmp_path, os.urandom(3 * CS + 5))
+    header, recs = split(enc.read_bytes())
+    recs[0], recs[1] = recs[1], recs[0]
+    enc.write_bytes(join(header, recs))
+    assert_rejected(tmp_path, enc, key)
+
+
+def test_chunk_duplicate_over_another_is_detected(tmp_path):
+    key, enc = make(tmp_path, os.urandom(3 * CS + 5))
+    header, recs = split(enc.read_bytes())
+    recs[1] = recs[0]
+    enc.write_bytes(join(header, recs))
+    assert_rejected(tmp_path, enc, key)
+
+
+def test_chunk_from_another_file_is_detected(tmp_path):
+    key, enc = make(tmp_path, os.urandom(3 * CS + 5))
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    _, other_enc = make(other_dir, os.urandom(3 * CS + 5))
+    header, recs = split(enc.read_bytes())
+    _, other_recs = split(other_enc.read_bytes())
+    recs[1] = other_recs[1]
+    enc.write_bytes(join(header, recs))
+    assert_rejected(tmp_path, enc, key)
+
+
+# ---- attack: truncation (needs the final-chunk flag) ------------------------
+
+def test_dropping_last_chunk_is_detected(tmp_path):
+    key, enc = make(tmp_path, os.urandom(3 * CS + 5))
+    header, recs = split(enc.read_bytes())
+    enc.write_bytes(join(header, recs[:-1]))
+    assert_rejected(tmp_path, enc, key)
+
+
+def test_dropping_last_chunk_of_exact_multiple_is_detected(tmp_path):
+    key, enc = make(tmp_path, os.urandom(3 * CS))
+    header, recs = split(enc.read_bytes())
+    assert len(recs) == 3 and len(recs[-1]) == REC
+    enc.write_bytes(join(header, recs[:-1]))
+    assert_rejected(tmp_path, enc, key)
+
+
+def test_dropping_several_chunks_is_detected(tmp_path):
+    key, enc = make(tmp_path, os.urandom(5 * CS + 1))
+    header, recs = split(enc.read_bytes())
+    for keep in (1, 2, 3, 4):
+        enc.write_bytes(join(header, recs[:keep]))
+        assert_rejected(tmp_path, enc, key)
+
+
+def test_cutting_mid_chunk_is_detected(tmp_path):
+    key, enc = make(tmp_path, os.urandom(3 * CS + 5))
+    blob = enc.read_bytes()
+    for cut in (1, 10, 20, 40):
+        enc.write_bytes(blob[:-cut])
+        assert_rejected(tmp_path, enc, key)
+
+
+def test_header_only_empty_or_partial_header_is_detected(tmp_path):
+    key, enc = make(tmp_path, os.urandom(3 * CS))
+    blob = enc.read_bytes()
+    for piece in (blob[:HL], blob[:HL - 1], b""):
+        enc.write_bytes(piece)
+        assert_rejected(tmp_path, enc, key)
+
+
+def test_empty_file_cannot_be_emptied_further(tmp_path):
+    key, enc = make(tmp_path, b"")
+    blob = enc.read_bytes()
+    enc.write_bytes(blob[:HL])           # strip the single empty final chunk
+    assert_rejected(tmp_path, enc, key)
+
+
+# ---- attack: extension --------------------------------------------------
+
+def test_appending_a_chunk_is_detected(tmp_path):
+    key, enc = make(tmp_path, os.urandom(3 * CS + 5))
+    header, recs = split(enc.read_bytes())
+    enc.write_bytes(join(header, recs + [recs[0]]))
+    assert_rejected(tmp_path, enc, key)
+
+
+def test_appending_garbage_is_detected(tmp_path):
+    key, enc = make(tmp_path, os.urandom(3 * CS + 5))
+    enc.write_bytes(enc.read_bytes() + os.urandom(10))
+    assert_rejected(tmp_path, enc, key)
+
+
+def test_appending_a_copy_of_the_final_chunk_is_detected(tmp_path):
+    key, enc = make(tmp_path, os.urandom(3 * CS))
+    header, recs = split(enc.read_bytes())
+    enc.write_bytes(join(header, recs + [recs[-1]]))
+    assert_rejected(tmp_path, enc, key)
+
+
+# ---- wrong key / wrong file ID / not a vault file -----------------------------
+
+def test_wrong_data_key_is_detected(tmp_path):
+    _, enc = make(tmp_path, os.urandom(2 * CS))
+    assert_rejected(tmp_path, enc, vc.generate_data_key())
+
+
+def test_wrong_file_id_is_detected(tmp_path):
+    key, enc = make(tmp_path, os.urandom(2 * CS))
+    assert_rejected(tmp_path, enc, key, file_id="F-000000000002")
+
+
+def test_random_file_is_rejected(tmp_path):
+    enc = tmp_path / "x.enc"
+    enc.write_bytes(os.urandom(500))
+    assert_rejected(tmp_path, enc, vc.generate_data_key())
+
+
+def test_huge_chunk_size_in_header_is_rejected(tmp_path):
+    key, enc = make(tmp_path, os.urandom(2 * CS))
+    blob = bytearray(enc.read_bytes())
+    blob[5:9] = (vc.MAX_CHUNK_SIZE + 1).to_bytes(4, "big")
+    enc.write_bytes(bytes(blob))
+    assert_rejected(tmp_path, enc, key)
+
+
+# ---- failure behaviour ------------------------------------------------------
+
+def test_failed_decrypt_does_not_touch_an_existing_output(tmp_path):
+    key, enc = make(tmp_path, os.urandom(3 * CS))
+    blob = bytearray(enc.read_bytes())
+    blob[-1] ^= 0x01
+    enc.write_bytes(bytes(blob))
+    out = tmp_path / "out.bin"
+    out.write_bytes(b"precious")
+    with pytest.raises(vc.IntegrityError):
+        vc.decrypt_file(enc, out, key, FID)
+    assert out.read_bytes() == b"precious"
+    assert not (tmp_path / "out.bin.part").exists()
+
+
+def test_tamper_in_last_chunk_leaves_no_plaintext_even_though_earlier_chunks_were_ok(tmp_path):
+    key, enc = make(tmp_path, os.urandom(4 * CS))
+    blob = bytearray(enc.read_bytes())
+    blob[-1] ^= 0x01
+    enc.write_bytes(bytes(blob))
+    assert_rejected(tmp_path, enc, key)
+
+
+# ==========================================================================
+# CLI: init / add-file / open-file
+# ==========================================================================
+
+runner = CliRunner()
+
+
+@pytest.fixture
+def vault(tmp_path, monkeypatch):
+    monkeypatch.setattr(vc, "DEFAULT_SCRYPT_PARAMS", FAST)
+    v = tmp_path / "vault"
+    result = runner.invoke(cli.app, ["init", "--vault", str(v)], input="pw\npw\n")
+    assert result.exit_code == 0, result.output
+    return v
+
+
+def _add(vault, src, passphrase="pw"):
+    return runner.invoke(cli.app, ["add-file", str(src), "--vault", str(vault)],
+                         input=f"{passphrase}\n")
+
+
+def _open(vault, file_id, out, passphrase="pw"):
+    return runner.invoke(cli.app, ["open-file", file_id, str(out), "--vault", str(vault)],
+                         input=f"{passphrase}\n")
+
+
+def _only_file_id(vault):
+    ids = [p.stem for p in (vault / "files").glob("*.enc")]
+    assert len(ids) == 1
+    return ids[0]
+
+
+def test_cli_init_creates_vault_and_refuses_second_init(vault):
+    assert (vault / "vault.json").is_file()
+    assert (vault / "files").is_dir()
+    again = runner.invoke(cli.app, ["init", "--vault", str(vault)], input="pw\npw\n")
+    assert again.exit_code != 0
+
+
+def test_cli_add_and_open_roundtrip(vault, tmp_path):
+    src = tmp_path / "secret.csv"
+    data = os.urandom(3 * vc.CHUNK_SIZE // 2)
+    src.write_bytes(data)
+    added = _add(vault, src)
+    assert added.exit_code == 0, added.output
+    file_id = _only_file_id(vault)
+    assert file_id in added.output
+    assert "secret" not in file_id and not any("secret" in p.name for p in (vault / "files").iterdir())
+
+    out = tmp_path / "restored.csv"
+    opened = _open(vault, file_id, out)
+    assert opened.exit_code == 0, opened.output
+    assert out.read_bytes() == data
+
+
+def test_cli_wrong_passphrase_is_refused(vault, tmp_path):
+    src = tmp_path / "a.bin"
+    src.write_bytes(b"hello")
+    assert _add(vault, src, passphrase="wrong").exit_code != 0
+    assert list((vault / "files").glob("*.enc")) == []
+
+    assert _add(vault, src).exit_code == 0
+    out = tmp_path / "o.bin"
+    assert _open(vault, _only_file_id(vault), out, passphrase="wrong").exit_code != 0
+    assert not out.exists()
+
+
+def test_cli_detects_tampered_vault_file(vault, tmp_path):
+    src = tmp_path / "a.bin"
+    src.write_bytes(os.urandom(5000))
+    assert _add(vault, src).exit_code == 0
+    file_id = _only_file_id(vault)
+    enc = vault / "files" / f"{file_id}.enc"
+    blob = bytearray(enc.read_bytes())
+    blob[100] ^= 0x01
+    enc.write_bytes(bytes(blob))
+
+    out = tmp_path / "o.bin"
+    result = _open(vault, file_id, out)
+    assert result.exit_code != 0
+    assert not out.exists()
+
+
+def test_cli_detects_swapped_wrapped_key(vault, tmp_path):
+    a, b = tmp_path / "a.bin", tmp_path / "b.bin"
+    a.write_bytes(b"first file")
+    b.write_bytes(b"second file")
+    assert _add(vault, a).exit_code == 0
+    assert _add(vault, b).exit_code == 0
+    id1, id2 = sorted(p.stem for p in (vault / "files").glob("*.enc"))
+    k1 = (vault / "files" / f"{id1}.key").read_bytes()
+    k2 = (vault / "files" / f"{id2}.key").read_bytes()
+    (vault / "files" / f"{id1}.key").write_bytes(k2)
+    (vault / "files" / f"{id2}.key").write_bytes(k1)
+
+    out = tmp_path / "o.bin"
+    assert _open(vault, id1, out).exit_code != 0
+    assert not out.exists()
+
+
+def test_cli_rejects_path_traversal_in_file_id(vault, tmp_path):
+    out = tmp_path / "o.bin"
+    assert _open(vault, "../vault", out).exit_code != 0
+    assert _open(vault, "F-../../x", out).exit_code != 0
+
+
+def test_cli_refuses_to_overwrite_output_and_missing_ids(vault, tmp_path):
+    src = tmp_path / "a.bin"
+    src.write_bytes(b"hello")
+    assert _add(vault, src).exit_code == 0
+    file_id = _only_file_id(vault)
+    out = tmp_path / "o.bin"
+    out.write_bytes(b"existing")
+    assert _open(vault, file_id, out).exit_code != 0
+    assert out.read_bytes() == b"existing"
+    assert _open(vault, "F-ffffffffffff", tmp_path / "new.bin").exit_code != 0
+
+
+def test_cli_commands_fail_cleanly_without_a_vault(tmp_path):
+    src = tmp_path / "a.bin"
+    src.write_bytes(b"x")
+    missing = tmp_path / "nope"
+    assert _add(missing, src).exit_code != 0
+    assert _open(missing, "F-ffffffffffff", tmp_path / "o.bin").exit_code != 0
