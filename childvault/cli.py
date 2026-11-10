@@ -18,12 +18,13 @@ import typer
 
 from . import __version__, config, db
 from . import bundle as bnd
+from . import ops
 from . import identity as idm
 from . import keyshare as ks
 from . import vault_crypto as vc
 
 MIN_PASSPHRASE_LEN = 8
-FILE_ID_RE = re.compile(r"^F-[0-9a-f]{16}$")      # matches db.new_file_id()
+FILE_ID_RE = ops.FILE_ID_RE
 
 app = typer.Typer(
     help="ChildVault: encrypted, tamper-evident storage for child-behaviour data.",
@@ -187,28 +188,10 @@ def add_file(
 
     conn, kek = unlock_vault(passphrase)
     try:
-        if cid is not None:
-            imap = load_identity_map(kek)
-            if cid not in imap.ids():
-                fail(f"no child with id {cid} - run `childvault pseudonymize` first")
-
-        files_dir = config.get_files_dir()
-        files_dir.mkdir(parents=True, exist_ok=True)
-        file_id = db.new_file_id()
-        while (files_dir / f"{file_id}.enc").exists():
-            file_id = db.new_file_id()
-        enc_path = files_dir / f"{file_id}.enc"
-
-        data_key = vc.generate_data_key()
-        try:
-            vc.encrypt_file(path, enc_path, data_key, file_id)
-            db.add_file_record(
-                conn, file_id, vc.wrap_key(kek, data_key, file_id), file_type.value,
-                path.suffix, "owner", child_id=cid, plaintext_size=path.stat().st_size,
-            )
-        except (vc.VaultCryptoError, db.VaultDBError, OSError) as exc:
-            enc_path.unlink(missing_ok=True)          # no orphan blob without a record
-            fail(str(exc))
+        file_id = ops.add_file(conn, kek, path, file_type.value, cid,
+                               ops.safe_extension(path.name))
+    except ops.OpsError as exc:
+        fail(str(exc))
     finally:
         conn.close()
 
@@ -222,28 +205,18 @@ def open_file(
     passphrase: str = passphrase_option(),
 ) -> None:
     """Decrypt a file from the vault (fails if it was tampered with)."""
-    # Strict format check first: the ID becomes part of a path, so no "../".
-    if not FILE_ID_RE.match(file_id):
-        fail("invalid file ID")
-    if out.exists():
-        fail(f"'{out}' already exists; choose a new output path")
+    try:                                              # cheap checks before the slow unlock
+        ops.check_file_id(file_id)
+        if out.exists():
+            raise ops.InvalidInputError(f"'{out}' already exists; choose a new output path")
+    except ops.OpsError as exc:
+        fail(str(exc))
 
     conn, kek = unlock_vault(passphrase)
     try:
-        try:
-            row = db.get_file(conn, file_id)
-        except db.FileNotInVaultError:
-            fail(f"file '{file_id}' not found in the vault")
-        enc_path = config.get_files_dir() / f"{file_id}.enc"
-        if not enc_path.is_file():
-            fail(f"encrypted data for '{file_id}' is missing from the vault folder")
-        try:
-            data_key = vc.unwrap_key(kek, bytes(row["wrapped_key"]), file_id)
-            vc.decrypt_file(enc_path, out, data_key, file_id)
-        except vc.VaultCryptoError as exc:
-            fail(str(exc))
-        except OSError as exc:
-            fail(str(exc))
+        ops.open_file(conn, kek, file_id, out)
+    except ops.OpsError as exc:
+        fail(str(exc))
     finally:
         conn.close()
 
@@ -256,39 +229,17 @@ def revoke(
     passphrase: str = passphrase_option(),
 ) -> None:
     """Revoke shared access by re-encrypting a file under a new key."""
-    if not FILE_ID_RE.match(file_id):
-        fail("invalid file ID")
+    try:
+        ops.check_file_id(file_id)
+    except ops.OpsError as exc:
+        fail(str(exc))
 
     conn, kek = unlock_vault(passphrase)
-    tmp_plain = tmp_new = None
     try:
-        try:
-            row = db.get_file(conn, file_id)
-        except db.FileNotInVaultError:
-            fail(f"file '{file_id}' not found in the vault")
-        enc_path = config.get_files_dir() / f"{file_id}.enc"
-        if not enc_path.is_file():
-            fail(f"encrypted data for '{file_id}' is missing from the vault folder")
-
-        fd, plain_name = tempfile.mkstemp(prefix=".revoke-", dir=config.get_files_dir())
-        os.close(fd)
-        tmp_plain = Path(plain_name)
-        tmp_new = enc_path.with_name(enc_path.name + ".new")
-        try:
-            old_key = vc.unwrap_key(kek, bytes(row["wrapped_key"]), file_id)
-            vc.decrypt_file(enc_path, tmp_plain, old_key, file_id)   # verifies integrity first
-            new_key = vc.generate_data_key()
-            vc.encrypt_file(tmp_plain, tmp_new, new_key, file_id)
-            # DB update and file swap succeed together, or the DB change is rolled back.
-            with conn:
-                version = db.rotate_file_key(conn, file_id, vc.wrap_key(kek, new_key, file_id))
-                os.replace(tmp_new, enc_path)
-        except (vc.VaultCryptoError, OSError) as exc:
-            fail(str(exc))
+        version = ops.revoke_file(conn, kek, file_id)
+    except ops.OpsError as exc:
+        fail(str(exc))
     finally:
-        for t in (tmp_plain, tmp_new):
-            if t is not None:
-                t.unlink(missing_ok=True)
         conn.close()
 
     typer.secho(f"Re-encrypted {file_id} under a new key (key version {version}).", fg=typer.colors.GREEN)
