@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 452" width="900" height="452" role="img" aria-labelledby="t d">
+  <title id="t">ChildVault terminal demo</title>
+  <desc id="d">A terminal session: create a vault, pseudonymize a child, add and open an encrypted file, then show that a single flipped bit makes decryption fail.</desc>
+  <style>
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    @keyframes l0 { 0%, 3.64% { opacity: 0; } 4.04%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    .l0 { animation: l0 22.0s linear infinite; }
+@keyframes l1 { 0%, 8.41% { opacity: 0; } 8.81%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    .l1 { animation: l1 22.0s linear infinite; }
+@keyframes l2 { 0%, 13.18% { opacity: 0; } 13.58%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    .l2 { animation: l2 22.0s linear infinite; }
+@keyframes l3 { 0%, 17.95% { opacity: 0; } 18.35%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    .l3 { animation: l3 22.0s linear infinite; }
+@keyframes l4 { 0%, 22.73% { opacity: 0; } 23.13%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    .l4 { animation: l4 22.0s linear infinite; }
+@keyframes l5 { 0%, 27.50% { opacity: 0; } 27.90%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    .l5 { animation: l5 22.0s linear infinite; }
+@keyframes l6 { 0%, 32.27% { opacity: 0; } 32.67%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    .l6 { animation: l6 22.0s linear infinite; }
+@keyframes l7 { 0%, 37.05% { opacity: 0; } 37.45%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    .l7 { animation: l7 22.0s linear infinite; }
+@keyframes l8 { 0%, 41.82% { opacity: 0; } 42.22%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    .l8 { animation: l8 22.0s linear infinite; }
+@keyframes l9 { 0%, 46.59% { opacity: 0; } 46.99%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    .l9 { animation: l9 22.0s linear infinite; }
+@keyframes l10 { 0%, 51.36% { opacity: 0; } 51.76%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    .l10 { animation: l10 22.0s linear infinite; }
+@keyframes l11 { 0%, 56.14% { opacity: 0; } 56.54%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    .l11 { animation: l11 22.0s linear infinite; }
+@keyframes cur { 0%, 60.91% { opacity: 0; } 61.31% { opacity: 1; } 62.91% { opacity: 0; } 64.91% { opacity: 1; } 66.91% { opacity: 0; } 68.91% { opacity: 1; } 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    .cur { animation: cur 22.0s linear infinite; }
+    @media (prefers-reduced-motion: reduce) {
+      [class^="l"], .cur { animation: none !important; opacity: 1 !important; }
+    }
+  </style>
+  <rect width="900" height="452" rx="12" fill="#0d1117"/>
+  <rect x="0.5" y="0.5" width="899" height="451" rx="11.5" fill="none" stroke="#30363d"/>
+  <path d="M0 12 a12 12 0 0 1 12 -12 h876 a12 12 0 0 1 12 12 v26 h-900 z" fill="#161b22"/>
+  <circle cx="26" cy="19" r="6" fill="#ff5f56"/><circle cx="48" cy="19" r="6" fill="#ffbd2e"/><circle cx="70" cy="19" r="6" fill="#27c93f"/>
+  <text x="450" y="24" text-anchor="middle" font-size="12" fill="#8b949e" class="mono">childvault - bash</text>
+  <text class="l0 mono" x="28" y="78" font-size="13"><tspan fill="#22c55e">$</tspan> <tspan fill="#e2e8f0">python -m childvault init</tspan></text>
+  <text class="l1 mono" x="28" y="103" font-size="13"><tspan fill="#94a3b8">Vault created in .../vault_data</tspan></text>
+  <text class="l2 mono" x="28" y="128" font-size="13"><tspan fill="#22c55e">$</tspan> <tspan fill="#e2e8f0">python -m childvault pseudonymize --name "Test Child Alpha"</tspan></text>
+  <text class="l3 mono" x="28" y="153" font-size="13"><tspan fill="#94a3b8">Pseudonym: CH-A5A5</tspan></text>
+  <text class="l4 mono" x="28" y="178" font-size="13"><tspan fill="#22c55e">$</tspan> <tspan fill="#e2e8f0">python -m childvault add-file session.mp4 --type video --child CH-A5A5</tspan></text>
+  <text class="l5 mono" x="28" y="203" font-size="13"><tspan fill="#94a3b8">Added F-f5b7ace9bcae9215</tspan></text>
+  <text class="l6 mono" x="28" y="228" font-size="13"><tspan fill="#22c55e">$</tspan> <tspan fill="#e2e8f0">python -m childvault open-file F-f5b7ace9bcae9215 --out copy.mp4</tspan></text>
+  <text class="l7 mono" x="28" y="253" font-size="13"><tspan fill="#4ade80">Decrypted F-f5b7ace9bcae9215 to 'copy.mp4'</tspan></text>
+  <text class="l8 mono" x="28" y="278" font-size="13"><tspan fill="#64748b" font-style="italic"># an attacker flips ONE bit inside the stored, encrypted file ...</tspan></text>
+  <text class="l9 mono" x="28" y="303" font-size="13"><tspan fill="#22c55e">$</tspan> <tspan fill="#e2e8f0">python -m childvault open-file F-f5b7ace9bcae9215 --out bad.mp4</tspan></text>
+  <text class="l10 mono" x="28" y="328" font-size="13"><tspan fill="#f87171">Error: chunk 1 failed authentication (modified, reordered, truncated, wrong key or wrong file ID)</tspan></text>
+  <text class="l11 mono" x="28" y="353" font-size="13"><tspan fill="#64748b">exit code 1  -  nothing was written to bad.mp4</tspan></text>
+  <rect class="cur" x="28" y="364" width="8" height="16" fill="#e2e8f0"/>
+</svg>

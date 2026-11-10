@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 330" width="900" height="330" role="img" aria-labelledby="t d">
+  <title id="t">Tamper detection</title>
+  <desc id="d">An attacker flips one bit in chunk 2 of an encrypted file. The decryptor verifies chunk 0 and chunk 1, fails on chunk 2, stops, and writes no plaintext.</desc>
+  <style>
+    text { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .loop   { animation: loop 11s linear infinite; }
+    .flip   { animation: flip 11s linear infinite; }
+    .scan   { animation: scan 11s linear infinite; }
+    .ok0    { animation: ok0 11s linear infinite; }
+    .ok1    { animation: ok1 11s linear infinite; }
+    .c2box  { animation: c2box 11s linear infinite; }
+    .bad    { animation: bad 11s linear infinite; }
+    .c3     { animation: c3 11s linear infinite; }
+    .err    { animation: err 11s linear infinite; }
+    .out    { animation: out 11s linear infinite; }
+    @keyframes loop { 0% { opacity: 0; } 2%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    @keyframes flip { 0%, 7% { opacity: 0; } 9%, 100% { opacity: 1; } }
+    @keyframes scan {
+      0%, 14% { transform: translateX(0);     opacity: 0; }
+      16%     { transform: translateX(0);     opacity: 1; }
+      25%     { transform: translateX(0); }
+      29%     { transform: translateX(200px); }
+      39%     { transform: translateX(200px); }
+      43%     { transform: translateX(400px); }
+      60%     { transform: translateX(400px); opacity: 1; }
+      64%, 100% { transform: translateX(400px); opacity: 0; }
+    }
+    @keyframes ok0   { 0%, 24% { opacity: 0; } 26%, 100% { opacity: 1; } }
+    @keyframes ok1   { 0%, 38% { opacity: 0; } 40%, 100% { opacity: 1; } }
+    @keyframes c2box { 0%, 55% { stroke: #64748b; } 57%, 100% { stroke: #ef4444; } }
+    @keyframes bad   { 0%, 56% { opacity: 0; } 58%, 100% { opacity: 1; } }
+    @keyframes c3    { 0%, 60% { opacity: 1; } 63%, 100% { opacity: .3; } }
+    @keyframes err   { 0%, 60% { opacity: 0; } 63%, 100% { opacity: 1; } }
+    @keyframes out   { 0%, 70% { opacity: 0; } 73%, 100% { opacity: 1; } }
+    @media (prefers-reduced-motion: reduce) {
+      .loop, .flip, .scan, .ok0, .ok1, .c2box, .bad, .c3, .err, .out { animation: none; }
+      .loop, .flip, .ok0, .ok1, .bad, .err, .out { opacity: 1; } .scan { opacity: 0; }
+      .c2box { stroke: #ef4444; } .c3 { opacity: .3; }
+    }
+  </style>
+
+  <rect width="900" height="330" rx="18" fill="#0b1220"/>
+  <rect x="0.5" y="0.5" width="899" height="329" rx="17.5" fill="none" stroke="#334155"/>
+  <text x="450" y="40" text-anchor="middle" font-size="18" font-weight="700" fill="#e2e8f0">Every chunk is verified before a single byte is released</text>
+
+  <g class="loop">
+    <!-- chunks -->
+    <g font-size="14" font-weight="700" fill="#e2e8f0" text-anchor="middle">
+      <rect x="60"  y="110" width="150" height="86" rx="10" fill="#0f2a1d" stroke="#22c55e" stroke-width="2"/>
+      <text x="135" y="146">chunk 0</text>
+      <rect x="260" y="110" width="150" height="86" rx="10" fill="#0f2a1d" stroke="#22c55e" stroke-width="2"/>
+      <text x="335" y="146">chunk 1</text>
+      <rect class="c2box" x="460" y="110" width="150" height="86" rx="10" fill="#1e293b" stroke="#64748b" stroke-width="2.5"/>
+      <text x="535" y="146">chunk 2</text>
+      <g class="c3">
+        <rect x="660" y="110" width="150" height="86" rx="10" fill="#0f2a1d" stroke="#22c55e" stroke-width="2"/>
+        <text x="735" y="146">chunk 3</text>
+      </g>
+    </g>
+    <g font-size="11" fill="#94a3b8" text-anchor="middle" class="mono">
+      <text x="135" y="168">nonce | data | tag</text><text x="335" y="168">nonce | data | tag</text>
+      <text x="535" y="168">nonce | data | tag</text><text x="735" y="168">nonce | data | tag</text>
+    </g>
+    <g font-size="11" fill="#7dd3fc" text-anchor="middle" class="mono">
+      <text x="135" y="218">AAD: file id, #0, not final</text><text x="335" y="218">AAD: file id, #1, not final</text>
+      <text x="535" y="218">AAD: file id, #2, not final</text><text x="735" y="218">AAD: file id, #3, FINAL</text>
+    </g>
+
+    <!-- attacker flips a bit -->
+    <g class="flip">
+      <rect x="523" y="178" width="9" height="9" fill="#ef4444"/>
+      <text x="535" y="100" text-anchor="middle" font-size="12" font-weight="700" fill="#fca5a5">attacker flips 1 bit</text>
+    </g>
+
+    <!-- scanner -->
+    <g class="scan"><path d="M135 92 l-9 -14 h18 z" fill="#facc15"/><text x="135" y="72" text-anchor="middle" font-size="11" fill="#fde68a">verifying</text></g>
+
+    <!-- results -->
+    <g class="ok0"><path d="M-11 2 l7 7 l14 -16" transform="translate(135 180)" fill="none" stroke="#22c55e" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></g>
+    <g class="ok1"><path d="M-11 2 l7 7 l14 -16" transform="translate(335 180)" fill="none" stroke="#22c55e" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></g>
+    <g class="bad"><path d="M-9 -9 l18 18 M9 -9 l-18 18" transform="translate(535 181)" fill="none" stroke="#ef4444" stroke-width="4.5" stroke-linecap="round"/></g>
+
+    <g class="err">
+      <rect x="150" y="246" width="600" height="30" rx="8" fill="#450a0a" stroke="#ef4444"/>
+      <text x="450" y="266" text-anchor="middle" font-size="13" font-weight="700" fill="#fecaca" class="mono">IntegrityError: chunk 2 failed authentication</text>
+    </g>
+    <g class="out">
+      <text x="450" y="304" text-anchor="middle" font-size="13" fill="#86efac">Decryption stopped. Nothing was written to disk, the partial output is deleted.</text>
+    </g>
+  </g>
+</svg>

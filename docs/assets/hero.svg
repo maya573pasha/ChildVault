@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" width="900" height="300" role="img" aria-labelledby="t d">
+  <title id="t">ChildVault</title>
+  <desc id="d">Plaintext data blocks travel into a vault and come out the other side as encrypted blocks.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#16264a"/>
+    </linearGradient>
+    <linearGradient id="ttl" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#7dd3fc"/>
+    </linearGradient>
+    <linearGradient id="door" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <radialGradient id="halo">
+      <stop offset="0" stop-color="#38bdf8" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#38bdf8" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <style>
+    text { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    .blk   { animation: travel 8s linear infinite; }
+    .b2    { animation-delay: -2s; }
+    .b3    { animation-delay: -4s; }
+    .b4    { animation-delay: -6s; }
+    .plain { animation: plain 8s linear infinite; }
+    .ciph  { animation: ciph 8s linear infinite; }
+    .b2 .plain, .b2 .ciph { animation-delay: -2s; }
+    .b3 .plain, .b3 .ciph { animation-delay: -4s; }
+    .b4 .plain, .b4 .ciph { animation-delay: -6s; }
+    .halo  { animation: pulse 2s ease-in-out infinite; transform-origin: 450px 225px; }
+    .dash  { animation: flow 1.2s linear infinite; }
+    @keyframes travel {
+      0%   { transform: translateX(0);     opacity: 0; }
+      4%   { opacity: 1; }
+      96%  { opacity: 1; }
+      100% { transform: translateX(780px); opacity: 0; }
+    }
+    @keyframes plain { 0%, 48% { opacity: 1; } 52%, 100% { opacity: 0; } }
+    @keyframes ciph  { 0%, 48% { opacity: 0; } 52%, 100% { opacity: 1; } }
+    @keyframes pulse { 0%, 100% { opacity: .55; transform: scale(.92); } 50% { opacity: 1; transform: scale(1.08); } }
+    @keyframes flow  { to { stroke-dashoffset: -16; } }
+    @media (prefers-reduced-motion: reduce) {
+      .blk, .plain, .ciph, .halo, .dash { animation: none; }
+      .blk { opacity: 1; }
+      .b1 { transform: translateX(120px); } .b2 { transform: translateX(260px); }
+      .b3 { transform: translateX(560px); } .b4 { transform: translateX(700px); }
+      .b1 .ciph, .b2 .ciph, .b3 .plain, .b4 .plain { opacity: 0; }
+      .b3 .ciph, .b4 .ciph { opacity: 1; }
+    }
+  </style>
+
+  <rect width="900" height="300" rx="18" fill="url(#bg)"/>
+  <rect x="0.5" y="0.5" width="899" height="299" rx="17.5" fill="none" stroke="#334155"/>
+
+  <!-- title block -->
+  <text x="40" y="92" font-size="56" font-weight="800" fill="url(#ttl)" letter-spacing="-1">ChildVault</text>
+  <text x="42" y="126" font-size="18" fill="#a8bbd8">Encrypted, tamper-evident storage for child-behaviour data.</text>
+
+  <g font-size="13" font-weight="600" fill="#cfe3ff">
+    <rect x="40"  y="148" width="112" height="26" rx="13" fill="#1e293b" stroke="#3b82f6"/><text x="96"  y="166" text-anchor="middle">AES-256-GCM</text>
+    <rect x="162" y="148" width="72"  height="26" rx="13" fill="#1e293b" stroke="#3b82f6"/><text x="198" y="166" text-anchor="middle">scrypt</text>
+    <rect x="244" y="148" width="80"  height="26" rx="13" fill="#1e293b" stroke="#3b82f6"/><text x="284" y="166" text-anchor="middle">X25519</text>
+    <rect x="334" y="148" width="80"  height="26" rx="13" fill="#1e293b" stroke="#3b82f6"/><text x="374" y="166" text-anchor="middle">Ed25519</text>
+    <rect x="424" y="148" width="80"  height="26" rx="13" fill="#1e293b" stroke="#3b82f6"/><text x="464" y="166" text-anchor="middle">SHA-256</text>
+  </g>
+
+  <!-- conveyor -->
+  <line x1="20" y1="225" x2="880" y2="225" stroke="#334155" stroke-width="2" stroke-dasharray="8 8" class="dash"/>
+
+  <!-- data blocks: plain (blue) turns into cipher (green) while hidden inside the vault -->
+  <g class="blk b1">
+    <g class="plain"><rect x="40" y="207" width="36" height="36" rx="7" fill="#1e3a8a" stroke="#60a5fa" stroke-width="1.5"/>
+      <rect x="47" y="216" width="22" height="3" rx="1.5" fill="#bfdbfe"/><rect x="47" y="223" width="16" height="3" rx="1.5" fill="#bfdbfe"/><rect x="47" y="230" width="20" height="3" rx="1.5" fill="#bfdbfe"/></g>
+    <g class="ciph"><rect x="40" y="207" width="36" height="36" rx="7" fill="#052e16" stroke="#22c55e" stroke-width="1.5"/>
+      <g fill="#4ade80"><rect x="46" y="213" width="5" height="5"/><rect x="56" y="213" width="5" height="5" opacity=".4"/><rect x="65" y="214" width="5" height="5" opacity=".7"/>
+      <rect x="47" y="223" width="5" height="5" opacity=".6"/><rect x="57" y="224" width="5" height="5"/><rect x="65" y="224" width="5" height="5" opacity=".3"/>
+      <rect x="46" y="233" width="5" height="5" opacity=".8"/><rect x="56" y="233" width="5" height="5" opacity=".4"/><rect x="66" y="233" width="5" height="5"/></g></g>
+  </g>
+  <g class="blk b2">
+    <g class="plain"><rect x="40" y="207" width="36" height="36" rx="7" fill="#1e3a8a" stroke="#60a5fa" stroke-width="1.5"/>
+      <rect x="47" y="216" width="18" height="3" rx="1.5" fill="#bfdbfe"/><rect x="47" y="223" width="22" height="3" rx="1.5" fill="#bfdbfe"/><rect x="47" y="230" width="12" height="3" rx="1.5" fill="#bfdbfe"/></g>
+    <g class="ciph"><rect x="40" y="207" width="36" height="36" rx="7" fill="#052e16" stroke="#22c55e" stroke-width="1.5"/>
+      <g fill="#4ade80"><rect x="46" y="213" width="5" height="5" opacity=".5"/><rect x="56" y="214" width="5" height="5"/><rect x="65" y="213" width="5" height="5" opacity=".4"/>
+      <rect x="46" y="223" width="5" height="5"/><rect x="56" y="223" width="5" height="5" opacity=".3"/><rect x="66" y="224" width="5" height="5" opacity=".8"/>
+      <rect x="47" y="233" width="5" height="5" opacity=".4"/><rect x="57" y="234" width="5" height="5" opacity=".9"/><rect x="65" y="233" width="5" height="5" opacity=".5"/></g></g>
+  </g>
+  <g class="blk b3">
+    <g class="plain"><rect x="40" y="207" width="36" height="36" rx="7" fill="#1e3a8a" stroke="#60a5fa" stroke-width="1.5"/>
+      <rect x="47" y="216" width="20" height="3" rx="1.5" fill="#bfdbfe"/><rect x="47" y="223" width="12" height="3" rx="1.5" fill="#bfdbfe"/><rect x="47" y="230" width="22" height="3" rx="1.5" fill="#bfdbfe"/></g>
+    <g class="ciph"><rect x="40" y="207" width="36" height="36" rx="7" fill="#052e16" stroke="#22c55e" stroke-width="1.5"/>
+      <g fill="#4ade80"><rect x="47" y="213" width="5" height="5" opacity=".9"/><rect x="57" y="213" width="5" height="5" opacity=".3"/><rect x="66" y="214" width="5" height="5" opacity=".6"/>
+      <rect x="46" y="224" width="5" height="5" opacity=".4"/><rect x="56" y="223" width="5" height="5"/><rect x="65" y="223" width="5" height="5" opacity=".5"/>
+      <rect x="46" y="233" width="5" height="5"/><rect x="57" y="233" width="5" height="5" opacity=".7"/><rect x="66" y="234" width="5" height="5" opacity=".3"/></g></g>
+  </g>
+  <g class="blk b4">
+    <g class="plain"><rect x="40" y="207" width="36" height="36" rx="7" fill="#1e3a8a" stroke="#60a5fa" stroke-width="1.5"/>
+      <rect x="47" y="216" width="22" height="3" rx="1.5" fill="#bfdbfe"/><rect x="47" y="223" width="14" height="3" rx="1.5" fill="#bfdbfe"/><rect x="47" y="230" width="18" height="3" rx="1.5" fill="#bfdbfe"/></g>
+    <g class="ciph"><rect x="40" y="207" width="36" height="36" rx="7" fill="#052e16" stroke="#22c55e" stroke-width="1.5"/>
+      <g fill="#4ade80"><rect x="46" y="214" width="5" height="5" opacity=".6"/><rect x="56" y="213" width="5" height="5"/><rect x="66" y="213" width="5" height="5" opacity=".5"/>
+      <rect x="47" y="223" width="5" height="5" opacity=".9"/><rect x="57" y="224" width="5" height="5" opacity=".4"/><rect x="65" y="223" width="5" height="5"/>
+      <rect x="46" y="234" width="5" height="5" opacity=".3"/><rect x="56" y="233" width="5" height="5" opacity=".8"/><rect x="66" y="233" width="5" height="5" opacity=".6"/></g></g>
+  </g>
+
+  <!-- the vault (drawn after the blocks so they slide in behind it) -->
+  <circle class="halo" cx="450" cy="225" r="64" fill="url(#halo)"/>
+  <rect x="412" y="176" width="76" height="98" rx="12" fill="url(#door)" stroke="#93c5fd" stroke-width="2"/>
+  <rect x="422" y="186" width="56" height="78" rx="8" fill="#0f2a5e" stroke="#60a5fa" stroke-opacity=".6"/>
+  <!-- lock -->
+  <rect x="436" y="226" width="28" height="22" rx="4" fill="#fbbf24"/>
+  <path d="M441 226 v-7 a9 9 0 0 1 18 0 v7" fill="none" stroke="#fde68a" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="450" cy="236" r="3" fill="#78350f"/>
+
+  <g font-size="12" fill="#7f93b3" text-anchor="middle">
+    <text x="90"  y="278">plaintext</text>
+    <text x="450" y="292">vault</text>
+    <text x="810" y="278">ciphertext</text>
+  </g>
+</svg>
