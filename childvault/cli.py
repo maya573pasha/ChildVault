@@ -16,7 +16,7 @@ from pathlib import Path
 
 import typer
 
-from . import __version__, config, db
+from . import __version__, audit, config, db
 from . import bundle as bnd
 from . import ops
 from . import identity as idm
@@ -484,9 +484,20 @@ def open_shared(
 # ---------------------------------------------------------------- Laiba
 
 @app.command()
-def verify() -> None:
+def verify(passphrase: str = passphrase_option()) -> None:
     """Walk the audit hash chain and report any tampering."""
-    not_implemented("Laiba", 2)
+    conn, kek = unlock_vault(passphrase)
+    try:
+        result = audit.verify_chain(conn, audit.derive_audit_key(kek))
+    finally:
+        conn.close()
+
+    if result.ok:
+        typer.secho(f"Audit log OK: {result.entries} entries verified.", fg=typer.colors.GREEN)
+        return
+    typer.secho("AUDIT LOG TAMPERING DETECTED", fg=typer.colors.RED, bold=True, err=True)
+    where = f" (first bad entry: #{result.broken_at})" if result.broken_at is not None else ""
+    fail(f"{result.reason}{where}")
 
 
 audit_app = typer.Typer(help="Audit log commands.", no_args_is_help=True)
@@ -496,6 +507,18 @@ app.add_typer(audit_app, name="audit")
 @audit_app.command("show")
 def audit_show(
     limit: int = typer.Option(20, "--limit", min=1, help="How many recent entries to show."),
+    passphrase: str = passphrase_option(),
 ) -> None:
-    """Print the most recent audit log entries."""
-    not_implemented("Laiba", 2)
+    """Print the most recent audit log entries (and warn if the log was tampered with)."""
+    conn, kek = unlock_vault(passphrase)
+    try:
+        result = audit.verify_chain(conn, audit.derive_audit_key(kek))
+        entries = audit.show(conn, limit=limit)
+    finally:
+        conn.close()
+
+    if not result.ok:
+        typer.secho(f"WARNING: audit log failed verification - {result.reason}",
+                    fg=typer.colors.RED, bold=True, err=True)
+    typer.echo(audit.format_table(entries))
+    typer.echo(f"({len(entries)} of {result.entries} entries shown)")

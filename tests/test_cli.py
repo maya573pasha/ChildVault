@@ -82,16 +82,12 @@ def test_help_lists_every_command():
         assert name in output
 
 
-@pytest.mark.parametrize("args, owner", [
-    (["verify"], "Laiba"),
-    (["audit", "show"], "Laiba"),
-])
-def test_stub_says_not_implemented_with_owner(args, owner):
-    result = runner.invoke(app, args)
-    assert result.exit_code == 1
-    assert "not implemented" in result.output
-    assert owner in result.output
-
+def test_laiba_commands_need_a_vault(tmp_path, monkeypatch):
+    monkeypatch.setenv(config.ENV_VAR, str(tmp_path / "none"))
+    for args in (["verify"], ["audit", "show"]):
+        result = runner.invoke(app, args + ["--passphrase", "whatever123"])
+        assert result.exit_code == 1
+        assert "no vault found" in result.output
 
 def test_add_file_rejects_missing_file():
     result = runner.invoke(app, ["add-file", "does-not-exist.mp4"])
