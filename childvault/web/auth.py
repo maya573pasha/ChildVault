@@ -15,13 +15,14 @@ The passphrase and the KEK never go into a cookie, URL, page or log.
 """
 
 import secrets
+import sqlite3
 import time
 from dataclasses import dataclass, field
 
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from .. import config, db
+from .. import access, audit, config, db, users
 from .. import vault_crypto as vc
 from .html import esc, layout
 
@@ -30,8 +31,8 @@ IDLE_TIMEOUT = 15 * 60          # seconds without activity before logout
 MAX_FAILED_LOGINS = 5           # then the login form is locked for a while
 LOCKOUT_SECONDS = 60
 
-# Until Laiba's role system exists (Phase 3), whoever knows the vault
-# passphrase is the owner. Her permission checks replace this.
+# Kept for compatibility. The role now comes from the account that logs in
+# (users.authenticate): "owner" with the vault passphrase, or a researcher.
 DEFAULT_ROLE = "owner"
 
 
@@ -44,6 +45,7 @@ class Session:
     kek: bytes = field(repr=False)      # repr=False: never printed in logs / debug output
     role: str
     last_seen: float
+    username: str = ""          # who is logged in (appears in the audit log)
 
 
 class SessionStore:
@@ -54,9 +56,10 @@ class SessionStore:
         self.idle_timeout = idle_timeout
         self.clock = clock               # replaceable in tests to "fast-forward" time
 
-    def create(self, kek: bytes, role: str) -> str:
+    def create(self, kek: bytes, role: str, username: str | None = None) -> str:
         token = secrets.token_urlsafe(32)          # 256 random bits, unguessable
-        self._sessions[token] = Session(kek=kek, role=role, last_seen=self.clock())
+        self._sessions[token] = Session(kek=kek, role=role, last_seen=self.clock(),
+                                        username=username or role)
         return token
 
     def get(self, token: str | None) -> Session | None:
@@ -117,15 +120,27 @@ def require_login(request: Request) -> Session:
     return s
 
 
-def _derive_kek(passphrase: str) -> bytes | None:
-    """Unlock the vault; None for ANY failure (no hint about what was wrong)."""
+def _authenticate(username: str, passphrase: str) -> tuple[bytes, access.Actor] | None:
+    """Log in: (kek, actor), or None for ANY failure (no hint about what was wrong)."""
     if not config.get_db_path().is_file():
         return None
     conn = db.connect()
     try:
-        return vc.unlock(passphrase, db.load_header(conn))
+        return users.authenticate(conn, username.strip().lower() or users.OWNER_NAME, passphrase)
     except (db.VaultDBError, vc.VaultCryptoError, ValueError):
         return None
+    finally:
+        conn.close()
+
+
+def _log_login(kek: bytes, actor: access.Actor) -> None:
+    """Best effort: a tampered log must not stop the owner from logging in to investigate."""
+    conn = db.connect()
+    try:
+        with access.audited(conn, audit.derive_audit_key(kek), actor, "login", strict=False):
+            pass
+    except (audit.AuditError, sqlite3.Error):
+        pass
     finally:
         conn.close()
 
@@ -138,7 +153,11 @@ router = APIRouter()
 
 _LOGIN_FORM = """
 <form method="post" action="/login">
-  <label>Vault passphrase<br>
+  <label>Account<br>
+    <input type="text" name="username" value="owner" autocomplete="off">
+  </label>
+  <p></p>
+  <label>Passphrase<br>
     <input type="password" name="passphrase" autocomplete="off" required autofocus>
   </label>
   <button type="submit">Unlock</button>
@@ -154,23 +173,25 @@ def login_page(request: Request):
 
 
 @router.post("/login", response_class=HTMLResponse)
-def login(request: Request, passphrase: str = Form(...)):
+def login(request: Request, passphrase: str = Form(...), username: str = Form("owner")):
     limiter: LoginLimiter = request.app.state.login_limiter
     if limiter.is_locked():
         body = f'<p class="error">{esc("Too many wrong attempts. Wait a minute and try again.")}</p>'
         return HTMLResponse(layout("Log in", body + _LOGIN_FORM), status_code=429)
 
-    kek = _derive_kek(passphrase)
-    if kek is None:
+    result = _authenticate(username, passphrase)
+    if result is None:
         limiter.record_failure()
         body = f'<p class="error">{esc("Wrong passphrase.")}</p>'
         return HTMLResponse(layout("Log in", body + _LOGIN_FORM), status_code=401)
 
+    kek, actor = result
     limiter.record_success()
     # Always a NEW token at login (prevents "session fixation").
     old = request.cookies.get(COOKIE_NAME)
     request.app.state.sessions.delete(old)
-    token = request.app.state.sessions.create(kek, DEFAULT_ROLE)
+    token = request.app.state.sessions.create(kek, actor.role.value, actor.name)
+    _log_login(kek, actor)
 
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(

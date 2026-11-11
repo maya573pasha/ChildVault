@@ -16,7 +16,7 @@ from pathlib import Path
 
 import typer
 
-from . import __version__, audit, config, db
+from . import __version__, access, audit, config, db, users
 from . import bundle as bnd
 from . import ops
 from . import identity as idm
@@ -56,6 +56,44 @@ def passphrase_option():
     )
 
 
+# Who is running the current command. Reset by main() at the start of EVERY run.
+_session = {"user": users.OWNER_NAME, "actor": None}
+
+
+def _current_username() -> str:
+    return _session["user"]
+
+
+def _remember_actor(actor: access.Actor) -> None:
+    _session["actor"] = actor
+
+
+def get_actor() -> access.Actor:
+    """Who is running this command (set by unlock_vault; owner if not set)."""
+    return _session["actor"] or access.Actor.owner()
+
+
+def audited_op(conn, kek: bytes, action: str, file_id: str | None = None,
+               details: dict | None = None, strict: bool = True):
+    """`with audited_op(...) as ev:` = permission check + operation + audit entry (see access.py)."""
+    return access.audited(conn, audit.derive_audit_key(kek), get_actor(), action,
+                          file_id, details, strict=strict)
+
+
+def _load_map(kek: bytes) -> idm.IdentityMap:
+    """Like load_identity_map, but raises (so it can run inside `audited_op`) instead of exiting."""
+    try:
+        return idm.load_map(kek, config.get_identity_map_path())
+    except idm.MapMissingError:
+        raise ops.VaultFileError("identity map is missing - it may have been deleted (restore it from a backup)") from None
+    except idm.MapIntegrityError:
+        raise ops.VaultFileError("identity map failed its integrity check - it was modified or damaged") from None
+
+
+# Errors every wired command turns into a clean message.
+_OP_ERRORS = (access.PermissionDenied, audit.AuditError, users.UserError)
+
+
 def unlock_vault(passphrase: str) -> tuple[sqlite3.Connection, bytes]:
     """
     Open the existing vault and derive the KEK from the passphrase.
@@ -70,7 +108,8 @@ def unlock_vault(passphrase: str) -> tuple[sqlite3.Connection, bytes]:
     conn = db.connect()
     try:
         header = db.load_header(conn)
-        kek = vc.unlock(passphrase, header)
+        kek, actor = users.authenticate(conn, _current_username(), passphrase, header)
+        _remember_actor(actor)
     except db.VaultNotInitializedError:
         conn.close()
         fail("vault is not initialized - run `childvault init` first")
@@ -105,8 +144,13 @@ def main(
         False, "--version", callback=_version_callback, is_eager=True,
         help="Show the version and exit.",
     ),
+    user: str = typer.Option(
+        users.OWNER_NAME, "--user", envvar="CHILDVAULT_USER",
+        help="Account to log in as (default: owner). Researchers: `childvault --user rana <command>`.",
+    ),
 ) -> None:
     """Options that apply to every command."""
+    _session["user"], _session["actor"] = user, None
 
 
 @app.command()
@@ -143,10 +187,13 @@ def init(
 @app.command()
 def status(passphrase: str = passphrase_option()) -> None:
     """Check the passphrase and show a summary of the vault."""
-    conn, _kek = unlock_vault(passphrase)
+    conn, kek = unlock_vault(passphrase)
     try:
-        n_files = len(db.list_files(conn))
-        n_log = len(db.get_audit_rows(conn))
+        with audited_op(conn, kek, "status", strict=False):
+            n_files = len(db.list_files(conn))
+            n_log = len(db.get_audit_rows(conn))
+    except _OP_ERRORS as exc:
+        fail(str(exc))
     finally:
         conn.close()
 
@@ -188,9 +235,12 @@ def add_file(
 
     conn, kek = unlock_vault(passphrase)
     try:
-        file_id = ops.add_file(conn, kek, path, file_type.value, cid,
-                               ops.safe_extension(path.name))
-    except ops.OpsError as exc:
+        info = {"type": file_type.value, **({"child": cid} if cid else {})}
+        with audited_op(conn, kek, "add_file", details=info) as ev:
+            file_id = ops.add_file(conn, kek, path, file_type.value, cid,
+                                   ops.safe_extension(path.name), added_by=get_actor().name)
+            ev.file_id = file_id
+    except (*_OP_ERRORS, ops.OpsError) as exc:
         fail(str(exc))
     finally:
         conn.close()
@@ -214,8 +264,9 @@ def open_file(
 
     conn, kek = unlock_vault(passphrase)
     try:
-        ops.open_file(conn, kek, file_id, out)
-    except ops.OpsError as exc:
+        with audited_op(conn, kek, "open_file", file_id=file_id):
+            ops.open_file(conn, kek, file_id, out)
+    except (*_OP_ERRORS, ops.OpsError) as exc:
         fail(str(exc))
     finally:
         conn.close()
@@ -236,8 +287,10 @@ def revoke(
 
     conn, kek = unlock_vault(passphrase)
     try:
-        version = ops.revoke_file(conn, kek, file_id)
-    except ops.OpsError as exc:
+        with audited_op(conn, kek, "revoke", file_id=file_id) as ev:
+            version = ops.revoke_file(conn, kek, file_id)
+            ev.details["key_version"] = version
+    except (*_OP_ERRORS, ops.OpsError) as exc:
         fail(str(exc))
     finally:
         conn.close()
@@ -259,14 +312,16 @@ def pseudonymize(
 ) -> None:
     """Give a child a random pseudonym (e.g. CH-4F7A)."""
     conn, kek = unlock_vault(passphrase)
-    conn.close()                                  # the map lives outside the DB
-
-    imap = load_identity_map(kek)
     try:
-        child_id = imap.add(name)
-    except idm.IdentityError as exc:
+        with audited_op(conn, kek, "pseudonymize") as ev:
+            imap = _load_map(kek)
+            child_id = imap.add(name)
+            idm.save_map(kek, imap, config.get_identity_map_path())
+            ev.details["child"] = child_id        # the pseudonym, NEVER the real name
+    except (*_OP_ERRORS, ops.OpsError, idm.IdentityError) as exc:
         fail(str(exc))
-    idm.save_map(kek, imap, config.get_identity_map_path())
+    finally:
+        conn.close()
 
     typer.secho(f"Pseudonym: {child_id}", fg=typer.colors.GREEN)
     typer.echo("Use this ID everywhere instead of the child's name.")
@@ -285,15 +340,13 @@ def lookup(
 
     conn, kek = unlock_vault(passphrase)
     try:
-        n_files = len(db.list_files(conn, cid))
+        with audited_op(conn, kek, "lookup", details={"child": cid}):
+            n_files = len(db.list_files(conn, cid))
+            name = _load_map(kek).lookup(cid)
+    except (*_OP_ERRORS, ops.OpsError, idm.IdentityError) as exc:
+        fail(str(exc))
     finally:
         conn.close()
-
-    imap = load_identity_map(kek)
-    try:
-        name = imap.lookup(cid)
-    except idm.UnknownChildIDError as exc:
-        fail(str(exc))
 
     typer.echo(f"{cid}  ->  {name}")
     typer.echo(f"Files in vault for this child: {n_files}")
@@ -380,18 +433,17 @@ def share(
 
     conn, kek = unlock_vault(passphrase)
     try:
-        try:
+        with audited_op(conn, kek, "share") as ev:
             signing_key = bnd.get_or_create_signing_key(conn, kek)
             wrapped = ks.wrap_files_for_reviewer(conn, kek, file_ids, reviewer_pub)
             bundle = bnd.create_bundle(signing_key, reviewer_pub, wrapped, expiry)
-        except db.VaultDBError as exc:
-            fail(str(exc))
-        except (ks.KeyShareError, bnd.BundleError) as exc:
-            fail(str(exc))
+            bnd.save_bundle(bundle, out)
+            ev.details.update({"files": sorted(wrapped), "reviewer_fp": ks.fingerprint(reviewer_pub),
+                               "expires": bundle["payload"]["expires"]})
+    except (*_OP_ERRORS, db.VaultDBError, ks.KeyShareError, bnd.BundleError, OSError) as exc:
+        fail(str(exc))
     finally:
         conn.close()
-
-    bnd.save_bundle(bundle, out)
     payload = bundle["payload"]
     typer.secho(f"Share bundle written to {out}", fg=typer.colors.GREEN)
     typer.echo(f"Files:        {len(wrapped)}")
@@ -488,7 +540,11 @@ def verify(passphrase: str = passphrase_option()) -> None:
     """Walk the audit hash chain and report any tampering."""
     conn, kek = unlock_vault(passphrase)
     try:
-        result = audit.verify_chain(conn, audit.derive_audit_key(kek))
+        with audited_op(conn, kek, "verify", strict=False) as ev:
+            result = audit.verify_chain(conn, audit.derive_audit_key(kek))
+            ev.details = {"ok": result.ok, "entries": result.entries}
+    except _OP_ERRORS as exc:
+        fail(str(exc))
     finally:
         conn.close()
 
@@ -512,8 +568,11 @@ def audit_show(
     """Print the most recent audit log entries (and warn if the log was tampered with)."""
     conn, kek = unlock_vault(passphrase)
     try:
-        result = audit.verify_chain(conn, audit.derive_audit_key(kek))
-        entries = audit.show(conn, limit=limit)
+        with audited_op(conn, kek, "audit_show", details={"limit": limit}, strict=False):
+            result = audit.verify_chain(conn, audit.derive_audit_key(kek))
+            entries = audit.show(conn, limit=limit)
+    except _OP_ERRORS as exc:
+        fail(str(exc))
     finally:
         conn.close()
 
@@ -522,3 +581,60 @@ def audit_show(
                     fg=typer.colors.RED, bold=True, err=True)
     typer.echo(audit.format_table(entries))
     typer.echo(f"({len(entries)} of {result.entries} entries shown)")
+
+
+# ---------------------------------------------------------------- accounts
+
+@app.command("add-user")
+def add_user(
+    name: str = typer.Argument(..., help="Name for the new researcher account, e.g. rana."),
+    user_passphrase: str = typer.Option(
+        ..., "--user-passphrase", prompt="Passphrase for the new researcher", hide_input=True,
+        confirmation_prompt=True, help="The researcher's own passphrase.",
+    ),
+    passphrase: str = passphrase_option(),
+) -> None:
+    """(Owner) Create a researcher account with its own passphrase."""
+    conn, kek = unlock_vault(passphrase)
+    try:
+        with audited_op(conn, kek, "add_user", details={"user": name}):
+            users.create_user(conn, kek, name, user_passphrase)
+    except _OP_ERRORS as exc:
+        fail(str(exc))
+    finally:
+        conn.close()
+    typer.secho(f"Researcher '{name}' created.", fg=typer.colors.GREEN)
+    typer.echo(f"They log in with:  childvault --user {name} <command>")
+
+
+@app.command("remove-user")
+def remove_user(
+    name: str = typer.Argument(..., help="Researcher account to remove."),
+    passphrase: str = passphrase_option(),
+) -> None:
+    """(Owner) Delete a researcher account."""
+    conn, kek = unlock_vault(passphrase)
+    try:
+        with audited_op(conn, kek, "remove_user", details={"user": name}):
+            users.remove_user(conn, name)
+    except _OP_ERRORS as exc:
+        fail(str(exc))
+    finally:
+        conn.close()
+    typer.secho(f"Researcher '{name}' removed.", fg=typer.colors.GREEN)
+
+
+@app.command("users")
+def list_users_cmd(passphrase: str = passphrase_option()) -> None:
+    """(Owner) List researcher accounts."""
+    conn, kek = unlock_vault(passphrase)
+    try:
+        with audited_op(conn, kek, "list_users"):
+            accounts = users.list_users(conn)
+    except _OP_ERRORS as exc:
+        fail(str(exc))
+    finally:
+        conn.close()
+    typer.echo("owner (owner)")
+    for name, role in accounts:
+        typer.echo(f"{name} ({role})")

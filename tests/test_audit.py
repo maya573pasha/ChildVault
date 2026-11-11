@@ -224,3 +224,68 @@ def test_wrong_key_fails(conn, key):
     other = audit.derive_audit_key(os.urandom(32))
     r = audit.verify_chain(conn, other)
     assert not r.ok and "signature" in r.reason
+
+
+# ---- append must not "heal" a tampered log -----------------------------------
+
+def test_append_refused_after_tail_deletion_and_evidence_survives(conn, key):
+    """Attacker deletes the newest entries; the next normal action must NOT re-sign over it."""
+    fill(conn, key, 5)
+    drop_triggers(conn)
+    with conn:
+        conn.execute("DELETE FROM audit_log WHERE seq IN (4,5)")
+    with pytest.raises(audit.AuditTamperedError):
+        audit.append_event(conn, key, "owner", "open_file", "F-1")
+    r = audit.verify_chain(conn, key)
+    assert not r.ok and "deleted" in r.reason          # evidence is still there
+
+
+def test_append_refused_when_head_missing(conn, key):
+    fill(conn, key, 2)
+    with conn:
+        conn.execute("DELETE FROM vault_meta WHERE key=?", (audit.HEAD_META_KEY,))
+    with pytest.raises(audit.AuditTamperedError):
+        audit.append_event(conn, key, "owner", "x")
+
+
+def test_append_refused_after_wipe(conn, key):
+    fill(conn, key, 2)
+    drop_triggers(conn)
+    with conn:
+        conn.execute("DELETE FROM audit_log")
+    with pytest.raises(audit.AuditTamperedError):
+        audit.append_event(conn, key, "owner", "x")
+
+
+def test_forged_extra_row_is_not_legitimised(conn, key):
+    """Attacker appends a row (no key needed for the chain); the next append must refuse."""
+    fill(conn, key, 2)
+    last = db.get_last_audit_row(conn)
+    ts, h = "2026-01-01T00:00:00+00:00", None
+    h = audit.compute_entry_hash(ts, "intruder", "open_file", "F-1", None, last["entry_hash"])
+    db.append_audit_row(conn, ts, "intruder", "open_file", last["entry_hash"], h, file_id="F-1")
+    with pytest.raises(audit.AuditTamperedError):
+        audit.append_event(conn, key, "owner", "add_file")
+    assert not audit.verify_chain(conn, key).ok
+
+
+def test_head_problem_reports_reason_or_none(conn, key):
+    assert audit.head_problem(conn, key) is None
+    fill(conn, key, 2)
+    assert audit.head_problem(conn, key) is None
+    assert audit.head_problem(conn, audit.derive_audit_key(os.urandom(32))) is not None
+
+
+def test_row_and_head_are_written_atomically(conn, key, monkeypatch):
+    fill(conn, key, 1)
+
+    def boom(*a, **k):
+        raise RuntimeError("crash while writing the head")
+
+    monkeypatch.setattr(audit, "_write_head", boom)
+    with pytest.raises(RuntimeError):
+        audit.append_event(conn, key, "owner", "add_file")
+    monkeypatch.undo()
+    assert len(db.get_audit_rows(conn)) == 1          # the row was rolled back too
+    assert audit.verify_chain(conn, key).ok
+    audit.append_event(conn, key, "owner", "add_file")  # and the log still works

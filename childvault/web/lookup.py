@@ -7,20 +7,20 @@ child's files. Uses the KEK from the logged-in session.
   * POST, not GET: the ID being looked up never appears in the URL,
     browser history or bookmarks.
   * Every value shown (name, IDs, errors) goes through esc().
-  * Owner only. Laiba's role system will decide who counts as owner.
+  * Owner only (access.PERMISSIONS). Every lookup, denied attempt and failure is logged
+    with the pseudonym only - never the real name.
 """
 
 from fastapi import APIRouter, Depends, Form
 from fastapi.responses import HTMLResponse
 
-from .. import config, db
+from .. import access, audit, config, db
 from .. import identity as idm
+from . import guard
 from .auth import Session, require_login
 from .html import esc, layout
 
 router = APIRouter()
-
-ALLOWED_ROLES = {"owner"}
 
 _FORM = """
 <form method="post" action="/lookup">
@@ -43,14 +43,14 @@ def _error(session: Session, message: str, status: int) -> HTMLResponse:
 
 @router.get("/lookup", response_class=HTMLResponse)
 def lookup_form(session: Session = Depends(require_login)):
-    if session.role not in ALLOWED_ROLES:
+    if not guard.allowed(session, "lookup"):
         return _error(session, "Only the vault owner can see real names.", 403)
     return _page(session)
 
 
 @router.post("/lookup", response_class=HTMLResponse)
 def lookup(child_id: str = Form(...), session: Session = Depends(require_login)):
-    if session.role not in ALLOWED_ROLES:
+    if not guard.allowed(session, "lookup"):
         return _error(session, "Only the vault owner can see real names.", 403)
 
     try:
@@ -59,22 +59,18 @@ def lookup(child_id: str = Form(...), session: Session = Depends(require_login))
         return _error(session, str(exc), 400)
 
     try:
-        imap = idm.load_map(session.kek, config.get_identity_map_path())
+        with guard.audited_session(session, "lookup", details={"child": cid}) as (conn, ev):
+            imap = idm.load_map(session.kek, config.get_identity_map_path())
+            name = imap.lookup(cid)
+            files = db.list_files(conn, cid)
     except idm.MapMissingError:
         return _error(session, "The identity map is missing - it may have been deleted.", 500)
     except idm.MapIntegrityError:
         return _error(session, "The identity map failed its integrity check - it was modified or damaged.", 500)
-
-    try:
-        name = imap.lookup(cid)
     except idm.UnknownChildIDError:
         return _error(session, f"No child with ID {cid}.", 404)
-
-    conn = db.connect()
-    try:
-        files = db.list_files(conn, cid)
-    finally:
-        conn.close()
+    except (audit.AuditError, access.PermissionDenied):
+        return _error(session, guard.AUDIT_BROKEN_MESSAGE, 503)
 
     rows = "".join(
         f"<tr><td>{esc(f['file_id'])}</td><td>{esc(f['file_type'])}</td>"

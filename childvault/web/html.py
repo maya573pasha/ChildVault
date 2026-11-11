@@ -35,8 +35,10 @@ def layout(title: str, body: str, user_role: str | None = None) -> str:
     """
     if user_role:
         nav = (f'<span>Signed in as <b>{esc(user_role)}</b></span>'
-               '<nav><a href="/">Home</a><a href="/files">Files</a><a href="/lookup">Lookup</a>'
-               '<form method="post" action="/logout" style="display:inline;margin:0 0 0 1rem">'
+               '<nav><a href="/">Home</a>'
+               + ('<a href="/files">Files</a>' if user_role in ("owner", "researcher") else "")
+               + ('<a href="/lookup">Lookup</a>' if user_role == "owner" else "")
+               + '<form method="post" action="/logout" style="display:inline;margin:0 0 0 1rem">'
                '<button type="submit">Log out</button></form></nav>')
     else:
         nav = '<nav><a href="/login">Log in</a></nav>'

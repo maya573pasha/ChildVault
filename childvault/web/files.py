@@ -11,7 +11,8 @@ The real work is in ops.py (shared with the CLI). This module only does
 HTTP: login check, role check, size limit, and showing results safely.
 
 Security notes
-  * Owner only (Laiba's role system decides later who counts as owner).
+  * Who may do what comes from access.PERMISSIONS (owner: everything; researcher:
+    list/add/open; nobody else). Every action - allowed, denied or failed - is logged.
   * Everything shown goes through esc(). The uploaded file's NAME is never
     stored or shown - it can contain a child's name. Only a plain
     letters/digits extension is kept.
@@ -31,21 +32,22 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import FileResponse, HTMLResponse
 from starlette.background import BackgroundTask
 
-from .. import config, db, ops
-from .auth import Session, require_login
+from .. import access, audit, config, db, ops
+from . import guard
+from .auth import Session
 from .html import esc, layout
 
 router = APIRouter()
 
-ALLOWED_ROLES = {"owner"}
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024        # 500 MiB per file
 _STATUS = {ops.InvalidInputError: 400, ops.NotFoundError: 404, ops.VaultFileError: 500}
 
 
-def owner_only(session: Session = Depends(require_login)) -> Session:
-    if session.role not in ALLOWED_ROLES:
-        raise HTTPException(status_code=403, detail="Only the vault owner can manage files.")
-    return session
+# Who may do what comes from the permission table in access.py (the CLI uses the same one).
+can_list = guard.permit("list_files", "You may not view the file list.")
+can_add = guard.permit("add_file", "You may not add files.")
+can_open = guard.permit("open_file", "You may not open files.")
+can_revoke = guard.permit("revoke", "Only the vault owner can revoke access.")
 
 
 def limit_upload_size(request: Request) -> None:
@@ -115,12 +117,16 @@ def _error_page(session: Session, exc: ops.OpsError) -> HTMLResponse:
     return _page(session, str(exc), _STATUS.get(type(exc), 400))
 
 
+def _audit_page(session: Session) -> HTMLResponse:
+    return _page(session, guard.AUDIT_BROKEN_MESSAGE, 503)
+
+
 # --------------------------------------------------------------------------
 # Routes
 # --------------------------------------------------------------------------
 
 @router.get("/files", response_class=HTMLResponse)
-def files_page(session: Session = Depends(owner_only)):
+def files_page(session: Session = Depends(can_list)):
     return _page(session)
 
 
@@ -129,7 +135,7 @@ def upload(
     file: UploadFile = File(...),
     file_type: str = Form("other"),
     child_id: str = Form(""),
-    session: Session = Depends(owner_only),
+    session: Session = Depends(can_add),
 ):
     if file_type not in db.FILE_TYPES:
         return _page(session, f"Type must be one of: {', '.join(db.FILE_TYPES)}.", 400)
@@ -138,36 +144,42 @@ def upload(
     config.get_files_dir().mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=".upload-", dir=config.get_files_dir())
     tmp = Path(tmp_name)
-    conn = db.connect()
     try:
         with open(fd, "wb") as dst:
             shutil.copyfileobj(file.file, dst)
-        file_id = ops.add_file(
-            conn, session.kek, tmp, file_type, child_id.strip() or None,
-            ops.safe_extension(file.filename or ""),
-        )
+        with guard.audited_session(session, "add_file") as (conn, ev):
+            file_id = ops.add_file(
+                conn, session.kek, tmp, file_type, child_id.strip() or None,
+                ops.safe_extension(file.filename or ""), added_by=guard.actor_of(session).name,
+            )
+            ev.file_id = file_id
+            # Log the VALIDATED pseudonym only - the typed text could be a real name.
+            ev.details = {"type": file_type, **({"child": db.get_file(conn, file_id)["child_id"]}
+                                                if child_id.strip() else {})}
     except ops.OpsError as exc:
         return _error_page(session, exc)
+    except (audit.AuditError, access.PermissionDenied):
+        return _audit_page(session)
     finally:
-        conn.close()
         tmp.unlink(missing_ok=True)
     return _page(session, f"Added {file_id}.", ok=True)
 
 
 @router.post("/files/{file_id}/open")
-def open_file(file_id: str, session: Session = Depends(owner_only)):
+def open_file(file_id: str, session: Session = Depends(can_open)):
     workdir = Path(tempfile.mkdtemp(prefix=".open-", dir=config.get_files_dir()))
     out = workdir / "plain"
     cleanup = BackgroundTask(shutil.rmtree, workdir, ignore_errors=True)
-    conn = db.connect()
     try:
-        ops.open_file(conn, session.kek, file_id, out)
-        row = db.get_file(conn, file_id)
+        with guard.audited_session(session, "open_file", file_id=guard.safe_file_id(file_id)) as (conn, ev):
+            ops.open_file(conn, session.kek, file_id, out)
+            row = db.get_file(conn, file_id)
     except ops.OpsError as exc:
         shutil.rmtree(workdir, ignore_errors=True)
         return _error_page(session, exc)
-    finally:
-        conn.close()
+    except (audit.AuditError, access.PermissionDenied):
+        shutil.rmtree(workdir, ignore_errors=True)
+        return _audit_page(session)
 
     name = file_id + (f".{row['extension']}" if row["extension"] else "")
     return FileResponse(
@@ -176,7 +188,7 @@ def open_file(file_id: str, session: Session = Depends(owner_only)):
 
 
 @router.get("/files/{file_id}/revoke", response_class=HTMLResponse)
-def revoke_confirm(file_id: str, session: Session = Depends(owner_only)):
+def revoke_confirm(file_id: str, session: Session = Depends(can_revoke)):
     try:
         ops.check_file_id(file_id)
     except ops.OpsError as exc:
@@ -192,12 +204,13 @@ def revoke_confirm(file_id: str, session: Session = Depends(owner_only)):
 
 
 @router.post("/files/{file_id}/revoke", response_class=HTMLResponse)
-def revoke(file_id: str, session: Session = Depends(owner_only)):
-    conn = db.connect()
+def revoke(file_id: str, session: Session = Depends(can_revoke)):
     try:
-        version = ops.revoke_file(conn, session.kek, file_id)
+        with guard.audited_session(session, "revoke", file_id=guard.safe_file_id(file_id)) as (conn, ev):
+            version = ops.revoke_file(conn, session.kek, file_id)
+            ev.details["key_version"] = version
     except ops.OpsError as exc:
         return _error_page(session, exc)
-    finally:
-        conn.close()
+    except (audit.AuditError, access.PermissionDenied):
+        return _audit_page(session)
     return _page(session, f"Re-encrypted {file_id} under a new key (version {version}).", ok=True)

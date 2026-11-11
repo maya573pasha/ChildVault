@@ -20,8 +20,14 @@ Storage (SQL) is Mariyam's db.py; this module only does the hashing, the
 signed head, `verify` and `show`.
 
 Known limits (state these honestly in the report):
-  * Not atomic: the row and the head are written in two commits. A crash
-    between them makes verify report a stale head (a false alarm, not a miss).
+  * The row and the head are written in ONE transaction, so a crash can never
+    leave them out of step.
+  * append_event REFUSES to append if the log already fails its head check.
+    Otherwise the next normal action would re-sign the head over a truncated
+    log and silently erase the evidence of the deletion.
+  * Rollback: an attacker who saved an OLD copy of the database can restore it
+    and everything is self-consistent again. Only a copy of the head hash kept
+    somewhere else (printed, e-mailed) can reveal that.
   * Two processes appending at the exact same moment could fork the chain.
     ChildVault is a single-user, single-machine tool, so this is out of scope.
   * Someone who knows the passphrase can forge a log. That is outside the
@@ -50,6 +56,10 @@ AUDIT_KEY_LEN = 32
 
 class AuditError(Exception):
     """Base class for audit-log errors."""
+
+
+class AuditTamperedError(AuditError):
+    """The log fails its integrity check, so nothing more may be appended to it."""
 
 
 # --------------------------------------------------------------------------
@@ -85,15 +95,48 @@ def _head_mac(audit_key: bytes, seq: int, entry_hash: str) -> str:
     return hmac.new(audit_key, f"{seq}:{entry_hash}".encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def _store_head(conn: sqlite3.Connection, audit_key: bytes, seq: int, entry_hash: str) -> None:
+def _write_head(conn: sqlite3.Connection, audit_key: bytes, seq: int, entry_hash: str) -> None:
+    """Upsert the signed head. Does NOT commit: runs inside append_event's transaction."""
     head = json.dumps({"seq": seq, "hash": entry_hash,
                        "mac": _head_mac(audit_key, seq, entry_hash)}, sort_keys=True)
-    with conn:
-        conn.execute(
-            "INSERT INTO vault_meta (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (HEAD_META_KEY, head),
-        )
+    conn.execute(
+        "INSERT INTO vault_meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (HEAD_META_KEY, head),
+    )
+
+
+def _head_problem(conn: sqlite3.Connection, audit_key: bytes, last) -> tuple[str, int | None] | None:
+    """
+    Compare the signed head with the newest log row (`last`, or None if empty).
+    Returns (reason, broken_at) if something is wrong, else None. O(1).
+    """
+    raw = db.get_meta(conn, HEAD_META_KEY)
+    if raw is None:
+        if last is not None:
+            return "signed head is missing - the log cannot be authenticated", None
+        return None                                   # brand-new log
+    try:
+        head = json.loads(raw)
+        h_seq, h_hash, h_mac = int(head["seq"]), str(head["hash"]), str(head["mac"])
+    except (ValueError, KeyError, TypeError):
+        return "signed head is malformed", None
+    if not hmac.compare_digest(_head_mac(audit_key, h_seq, h_hash), h_mac):
+        return "signed head has an invalid signature (tampered, or wrong passphrase)", None
+    if last is None:
+        return f"log is empty but the signed head says it had {h_seq} entries (log was wiped)", None
+    if last["seq"] != h_seq or last["entry_hash"] != h_hash:
+        if last["seq"] < h_seq:
+            return (f"entries after #{last['seq']} were deleted "
+                    f"(signed head records up to #{h_seq})"), last["seq"] + 1
+        return "the log does not match its signed head (rewritten or extended outside the vault)", None
+    return None
+
+
+def head_problem(conn: sqlite3.Connection, audit_key: bytes) -> str | None:
+    """Reason the log cannot be appended to, or None if it is healthy."""
+    problem = _head_problem(conn, audit_key, db.get_last_audit_row(conn))
+    return problem[0] if problem else None
 
 
 # --------------------------------------------------------------------------
@@ -105,19 +148,32 @@ def append_event(conn: sqlite3.Connection, audit_key: bytes, actor: str, action:
     """
     Add one entry to the log and re-sign the head. Returns the entry's seq.
 
+    The row and the head are written in ONE transaction. Raises
+    AuditTamperedError (writing nothing) if the log already fails its head check.
     Every module calls this - nobody writes to audit_log directly.
     """
     if not actor or not action:
         raise AuditError("actor and action must not be empty")
     last = db.get_last_audit_row(conn)
+    problem = _head_problem(conn, audit_key, last)
+    if problem:
+        raise AuditTamperedError(f"audit log failed its integrity check: {problem[0]}")
+
     prev_hash = last["entry_hash"] if last is not None else GENESIS_HASH
     ts = db.utc_now()
-    # Must match exactly how db.append_audit_row serialises details.
+    # Same serialisation as db.append_audit_row, so the hash matches what is stored.
     details_json = json.dumps(details, sort_keys=True) if details is not None else None
     entry_hash = compute_entry_hash(ts, actor, action, file_id, details_json, prev_hash)
-    seq = db.append_audit_row(conn, ts, actor, action, prev_hash, entry_hash,
-                              file_id=file_id, details=details)
-    _store_head(conn, audit_key, seq, entry_hash)
+    try:
+        with conn:                                    # one transaction: row + head
+            seq = conn.execute(
+                """INSERT INTO audit_log (ts, actor, action, file_id, details, prev_hash, entry_hash)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (ts, actor, action, file_id, details_json, prev_hash, entry_hash),
+            ).lastrowid
+            _write_head(conn, audit_key, seq, entry_hash)
+    except sqlite3.IntegrityError as exc:
+        raise AuditError(f"could not append audit entry: {exc}") from None
     return seq
 
 
@@ -163,29 +219,11 @@ def verify_chain(conn: sqlite3.Connection, audit_key: bytes) -> VerifyResult:
         prev_hash, prev_seq = row["entry_hash"], seq
 
     # ---- 2. the signed head --------------------------------------------
-    raw = db.get_meta(conn, HEAD_META_KEY)
-    if raw is None:
-        if rows:
-            return _fail(len(rows), "signed head is missing - the log cannot be authenticated")
-        return VerifyResult(True, 0, None, "audit log is empty")
-    try:
-        head = json.loads(raw)
-        h_seq, h_hash, h_mac = int(head["seq"]), str(head["hash"]), str(head["mac"])
-    except (ValueError, KeyError, TypeError):
-        return _fail(len(rows), "signed head is malformed")
-
-    if not hmac.compare_digest(_head_mac(audit_key, h_seq, h_hash), h_mac):
-        return _fail(len(rows), "signed head has an invalid signature (tampered, or wrong passphrase)")
-
+    problem = _head_problem(conn, audit_key, rows[-1] if rows else None)
+    if problem:
+        return _fail(len(rows), problem[0], problem[1])
     if not rows:
-        return _fail(0, f"log is empty but the signed head says it had {h_seq} entries (log was wiped)")
-    last = rows[-1]
-    if last["seq"] != h_seq or last["entry_hash"] != h_hash:
-        if last["seq"] < h_seq:
-            return _fail(len(rows), f"entries after #{last['seq']} were deleted "
-                                    f"(signed head records up to #{h_seq})", last["seq"] + 1)
-        return _fail(len(rows), "the log does not match its signed head (rewritten or extended outside the vault)")
-
+        return VerifyResult(True, 0, None, "audit log is empty")
     return VerifyResult(True, len(rows))
 
 
