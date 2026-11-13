@@ -61,14 +61,22 @@ def reviewer(tmp_path):
     return priv, pub, path.read_text()
 
 
-def add_file(c, data=b"top secret clip"):
-    c.post("/files/upload", files={"file": ("a.mp4", data, "application/octet-stream")},
-           data={"file_type": "video", "child_id": ""})
+def _file_ids():
     conn = db.connect()
     try:
-        return db.list_files(conn)[-1]["file_id"]
+        return {r["file_id"] for r in db.list_files(conn)}
     finally:
         conn.close()
+
+
+def add_file(c, data=b"top secret clip"):
+    """Upload a file and return ITS id (by comparing before/after: added_at has 1-second
+    resolution, so "the last row" is not reliably the newest file)."""
+    before = _file_ids()
+    c.post("/files/upload", files={"file": ("a.mp4", data, "application/octet-stream")},
+           data={"file_type": "video", "child_id": ""})
+    (new,) = _file_ids() - before
+    return new
 
 
 def future(days=7):
