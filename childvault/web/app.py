@@ -8,7 +8,7 @@ It only listens on 127.0.0.1 (this computer), never on the network.
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 
-from . import auth, files, lookup
+from . import auditlog, auth, files, lookup, share
 from .html import layout
 
 # Sent with EVERY response.
@@ -49,6 +49,8 @@ def create_app(sessions: auth.SessionStore | None = None,
     app.include_router(auth.router)
     app.include_router(lookup.router)
     app.include_router(files.router)
+    app.include_router(share.router)
+    app.include_router(auditlog.router)
     # Teammates: register your routers here, e.g.
     #   from . import files;  app.include_router(files.router)
     return app
