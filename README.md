@@ -52,6 +52,7 @@ One flipped bit in a stored file and the vault refuses to hand over *any* of it.
 - [Command reference](#command-reference)
 - [Web UI](#web-ui)
 - [Threat model and attack results](#threat-model-and-attack-results)
+- [Performance](#performance)
 - [Testing](#testing)
 - [Project structure](#project-structure)
 - [Project status](#project-status)
@@ -461,6 +462,27 @@ python scripts/attack_report.py --out docs/attack_results.md
 
 ---
 
+## Performance
+
+Measured with [scripts/benchmark.py](scripts/benchmark.py) on one Windows machine (details and caveats in
+[docs/report_benchmark.md](docs/report_benchmark.md)):
+
+| | Result |
+|---|---|
+| Extra disk space | 37 bytes for a small file, 0.0027% for large ones |
+| Encrypt / decrypt 100 MiB | about 0.2 s (500 MiB/s), 1.6x a plain copy of the same file |
+| Pure AES-256-GCM speed | about 4.6 GiB/s; the cipher is not the bottleneck |
+| A real `add-file` / `open-file` (10 MiB) | about 0.1 s, 60% of it the deliberate scrypt unlock |
+| Chunk size | 1 MiB: tiny overhead, 5 MiB of memory, nothing faster |
+
+<p align="center"><img src="docs/benchmark/time_by_size.png" alt="Encrypt and decrypt time against a plain copy" width="80%"></p>
+
+```bash
+python scripts/benchmark.py        # about 30 s; rewrites docs/benchmark/
+```
+
+---
+
 ## Testing
 
 ```bash
@@ -512,7 +534,7 @@ ChildVault/
 | 3. Access control | ✅ Signed bundles, revocation | ✅ Key wrapping, `share`, `import-bundle` | ✅ Roles, researcher accounts, audit wiring |
 | 4. Web UI | ✅ Files page | ✅ Login, lookup | ✅ Share page, audit viewer |
 | 5. Attack suite | ✅ File integrity attacks | ✅ Log attacks | ✅ Bundle attacks |
-| 6. Evaluation | 🚧 Benchmark and results section | ✅ Demo script · 🚧 backup recording | ✅ Threat model, report chapters · 🚧 final report, slides |
+| 6. Evaluation | ✅ Overhead benchmark and results chapter | ✅ Demo script · 🚧 backup recording | ✅ Threat model, report chapters · 🚧 final report, slides |
 
 ✅ done · 🚧 in progress
 

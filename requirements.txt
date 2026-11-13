@@ -1,4 +1,3 @@
-
 # Install with:  pip install -r requirements.txt
 cryptography
 typer
@@ -7,4 +6,4 @@ uvicorn
 python-multipart
 pytest
 httpx            # needed by FastAPI's TestClient in the web tests
- 
+matplotlib       # charts in scripts/benchmark.py (not needed to run the vault)
