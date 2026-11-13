@@ -34,7 +34,35 @@
 | 30 | Delete a stored .enc file | open-file reports the data as missing instead of failing silently. | 1/1 | Detected |
 | 31 | Pass a crafted file ID with ../ or odd characters | the strict ID format check rejects it first. | 5/5 | Detected |
 | 32 | Search every file in the vault folder for the plaintext | it is never present (only ciphertext). | 1/1 | Detected |
+| 33 | Change who did an action (actor) in any entry | that entry's SHA-256 no longer matches. | 6/6 | Detected |
+| 34 | Disguise the file opening (open_file) as a harmless action | entry hash mismatch. | 3/3 | Detected |
+| 35 | Move the time of the file opening by one second | entry hash mismatch. | 1/1 | Detected |
+| 36 | Point the open_file entry at a different file | entry hash mismatch. | 1/1 | Detected |
+| 37 | Change which child was looked up (details) | entry hash mismatch. | 1/1 | Detected |
+| 38 | Edit an entry AND recompute its own hash | the next entry's prev_hash no longer links to it. | 1/1 | Detected |
+| 39 | Edit any entry and recompute every hash after it | the HMAC-signed head no longer matches. | 6/6 | Detected |
+| 40 | Rewrite one entry's prev_hash link | chain broken at that entry. | 1/1 | Detected |
+| 41 | Delete one entry from the middle of the log | the following entry's prev_hash points at nothing. | 4/4 | Detected |
+| 42 | Delete the very first entry | entry 2 no longer links to the genesis hash. | 1/1 | Detected |
+| 43 | Delete the newest k entries (the chain that is left is perfect) | signed head records more entries. | 3/3 | Detected |
+| 44 | Delete every entry | signed head says the log had entries (log was wiped). | 1/1 | Detected |
+| 45 | Delete the last entries AND the signed head record | signed head is missing. | 1/1 | Detected |
+| 46 | Delete entry 3 and renumber the rest so seq has no gap | chain still broken where 3 was. | 1/1 | Detected |
+| 47 | Delete the file-opening entry and recompute all hashes | signed head no longer matches. | 1/1 | Detected |
+| 48 | Swap the contents of two entries (seq numbers stay) | chain broken at the earlier one. | 4/4 | Detected |
+| 49 | Swap the seq numbers of entries 3 and 4 so they are read in the wrong order | chain broken. | 1/1 | Detected |
+| 50 | Move the newest entry to the start of the log | sequence numbers are out of order. | 1/1 | Detected |
+| 51 | Reverse the order of every entry | chain broken at the first entry. | 1/1 | Detected |
+| 52 | Reorder entries and recompute all hashes so the chain is valid | signed head no longer matches. | 1/1 | Detected |
+| 53 | Insert a fake entry between two real ones | the real entry after it no longer links. | 1/1 | Detected |
+| 54 | Append a perfectly chained fake entry at the end | signed head does not cover it. | 1/1 | Detected |
+| 55 | Rewrite the head to match a truncated log, with a made-up HMAC | head signature invalid. | 1/1 | Detected |
+| 56 | Replace the signed head with garbage | head is malformed. | 1/1 | Detected |
+| 57 | Delete the last entries, then keep using the vault | commands refuse, evidence is not overwritten. | 1/1 | Detected |
+| 58 | Edit an old entry, then the owner keeps working normally | verify still finds the edit. | 1/1 | Detected |
+| 59 | Delete an entry and look at `audit show` instead of verify | audit show prints a warning. | 1/1 | Detected |
+| 60 | Try to verify (or re-sign the head) with a guessed passphrase | refused before reading the log. | 1/1 | Detected |
 
-**79 of 79 attack variants detected** (32 attack types).
+**127 of 127 attack variants detected** (60 attack types).
 
-Controls (no attack, must succeed): test_control_untouched_files_decrypt 1/1
+Controls (no attack, must succeed): test_control_untouched_files_decrypt 1/1, test_control_untouched_log_verifies 1/1
