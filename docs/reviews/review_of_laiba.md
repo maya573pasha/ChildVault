@@ -15,7 +15,7 @@ because the report currently claims more than the code does. The rest are small.
 |---|---|---|---|
 | 1 | Medium | "On a tampered log the vault refuses to change anything" is only true when the **signed head** fails, not after a mid-log edit | `access.audited`, `web/auditlog.py:46`, `docs/report_audit_log.md:57` |
 | 2 | Medium-low | If writing the success entry fails, an `open_file` happens with **no log entry at all**, and the plaintext is already on disk | `access.audited` (+ Aaleen's `open_file`) |
-| 3 | Low | Failed logins are never in the audit log (inherent), but this isn't stated as a limitation | `docs/threat_model.md` |
+| 3 | Low | Failed logins are never in the audit log (inherent). Stated in the audit chapter, but not in the threat model | `docs/threat_model.md` |
 | 4 | Low | Key-slot scrypt parameters are read from the DB without bounds | `users.authenticate` |
 | 5 | Nit | One expiry test sleeps 7 s on the real clock | `tests/attack/test_attack_bundle_expiry.py` |
 
@@ -71,10 +71,12 @@ So plaintext was released with no trace. That's exactly what the log is meant to
 ## 3. Failed logins leave no trace in the audit log (Low)
 
 A wrong passphrase means there's no KEK, so no audit key, so nothing *can* be appended. That's
-correct and unavoidable. But `threat_model.md:45` lists only the scrypt cost and the web lockout,
-so a reader may assume guessing attempts are logged. **Suggest one line** in the threat model and
-access-control chapter: *"Failed login attempts are not recorded in the audit log, because without
-the passphrase there is no key to sign an entry; only the web lockout slows online guessing."*
+correct and unavoidable, and `report_audit_log.md` already lists it under Limitations (line 105).
+*(Correction: an earlier version of this review said it was not stated anywhere.)* Only
+`threat_model.md:45` lists just the scrypt cost and the web lockout, so a reader of the threat model
+alone may assume guessing attempts are logged. **Suggest one line there:** *"Failed login attempts
+are not recorded in the audit log, because without the passphrase there is no key to sign an entry;
+only the web lockout slows online guessing."*
 
 ## 4. Unbounded scrypt parameters from the database (Low)
 
